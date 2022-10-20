@@ -1,159 +1,127 @@
-{-# LANGUAGE Rank2Types, TypeFamilies, DataKinds, DeriveFunctor, TypeOperators #-}
+{-# LANGUAGE Rank2Types, TypeFamilies, DataKinds, DeriveFunctor, GADTs #-}
+{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 
-data Cy_ f v =
-    Cy (v -> Cy_ f v)
-    | D (f (Cy_ f v))
-    | Var v
+data IListF x = Cons Int x deriving Functor
 
-newtype Cy f = MakeCy (forall v. Cy_ f v)
-
-data IListF x = Cons Int x deriving (Show, Functor)
-
-inf12 = MakeCy $ Cy (\v -> D $ Cons 1 (D $ Cons 2 $ Var v))
-
-class Fold (f :: * -> *) where
-    data Cata f (g :: * -> *)
-    elimF :: Cata f g -> (Cy_ f v -> Cy_ g v) -> f (Cy_ f v) -> Cy_ g v
+class Functor f => Fold (f :: * -> *) where
+    data Cata f a
+    collectF :: Monoid a => Cata f a
+    elimF :: Cata f a -> (Cy f -> a) -> f (Cy f) -> a
 
 instance Fold IListF where
-    newtype Cata IListF g = ListC (forall v. Int -> Cy_ g v -> Cy_ g v)
+    newtype Cata IListF a = ListC (Int -> a -> a)
+    collectF = ListC (const id)
     elimF (ListC cata) self (Cons x xs) = cata x (self xs)
 
-fold' :: Fold f => Cata f g -> Cy_ f v -> Cy_ g v
-fold' cata (Cy f)   = Cy (fold' cata . f)
-fold' cata (D y)    = elimF cata (fold' cata) y
-fold' _    (Var v)  = Var v
-
-fold :: Fold f1 => Cata f1 f2 -> Cy f1 -> Cy f2
-fold cata (MakeCy cy) = MakeCy (fold' cata cy)
-
-inf34 = fold (ListC (\x r -> D $ Cons (x+1) r)) inf12
-
--- これは fold で定義できそう (というか，できるべき)
-
-showCy_ :: ((Cy_ f String -> String) -> f (Cy_ f String) -> String) -> Int -> Cy_ f String -> String
-showCy_ showD cnt (Cy f) = 
-    let var = "x" ++ show cnt in
-    "cy(" ++ var ++ "." ++ showCy_ showD (cnt+1) (f var) ++ ")"
-showCy_ showD cnt (D d) = showD (showCy_ showD cnt) d
-showCy_ _ _       (Var s) = s
-
-showIList_ :: (t -> [Char]) -> IListF t -> [Char]
-showIList_ showCont (Cons x xs) = "Cons(" ++ show x ++ "," ++ showCont  xs ++ ")"
-
-showIList :: Cy IListF -> String
-showIList (MakeCy cy) = showCy_ showIList_ 0 cy
-
-
--- Broken cy-pair
-
-
-
-data Cy2_ f v w =
-    Cy2 (v -> Cy2_ f v w)
-    | DD (f (Cy2_ f v w))
-    | VarUs v
-    | VarOt w
-
-newtype Cy2 f g =
-    MakeCy2 {extCy2::forall v w. ((v,w) -> Cy2_ f v w, (v,w) -> Cy2_ g w v)}
-
--- inf1234 = MakeCy2 $ 
---     (
---         \(v,w) -> DD $ Cons 1 $ DD $ Cons 2 $ VarOt w, 
---         \(v,w) -> DD $ Cons 3 $ DD $ Cons 4 $ VarOt v
---     )
-
-
--- Broken bekic
-bekic :: Cy2 f g -> (Cy2_ f v (Cy2_ g w v), Cy2_ g w1 (Cy2_ f v2 (Cy2_ g w2 v2)))
-bekic cy2 =
-    (
-        Cy2 (\v -> 
-                let s = Cy2 (\w -> snd (extCy2 cy2) (v,w)) in
-                fst (extCy2 cy2) (v,s)
-            )
-        ,
-        Cy2 (\w ->
-                let s v = Cy2 (\w -> snd (extCy2 cy2) (v,w)) in
-                let t = Cy2 (\v -> fst (extCy2 cy2) (v,s v)) in
-                snd (extCy2 cy2) (t,w)
-            )
-    )
-
-data (:+:) f g x = LeftF (f x) | RightF (g x) deriving Functor
-
-
-data DB = Idx | Level
+showListF :: Cata IListF [Char]
+showListF = ListC (\k s -> "Cons(" ++ show k ++ "," ++ s ++ ")")
 
 -- first order binding (either w/ DeBruijn index or level)
-data CyFO (db :: DB) f =
-      CyFO (CyFO db f)
-    | DFO (f (CyFO db f))
-    | VarFO Int
+data Cy f =
+      Cy (Cy f)
+    | D (f (Cy f))
+    | Var Int
 
-toFO2_ :: Functor f => Int -> Cy2_ f Int Int -> CyFO Level f
-toFO2_ cnt (Cy2 f) = CyFO (toFO2_ (cnt+1) (f cnt))
-toFO2_ cnt (DD d)  = DFO $ fmap (toFO2_ cnt) d
-toFO2_ cnt (VarUs v) = VarFO v
-toFO2_ cnt (VarOt v) = VarFO v
+newtype StringF t = MkStringF String
+
+fold :: Fold f => Cata f (Cy g) -> Cy f -> Cy g
+fold cata (Cy f)   = Cy (fold cata f)
+fold cata (D y)    = elimF cata (fold cata) y
+fold _    (Var v)  = Var v
 
 
-----------------------------------------
--- translating back and forth from/to the first-order term
--- (which might not help at all)
-----------------------------------------
+incr' :: Functor f => Int -> Cy f -> Cy f
+incr' cnt (Cy f)  = Cy (incr' (cnt+1) f)
+incr' cnt (D y)   = D (fmap (incr' cnt) y) 
+incr' cnt (Var n) = if n >= cnt then Var (n+1) else Var n
 
-toFO :: Functor f => Cy f -> CyFO 'Level f
-toFO (MakeCy cy) = toFO_ 0 cy
+incr :: (Functor g1, Functor g2) => (Cy g1, Cy g2) -> (Cy g1, Cy g2)
+incr (cy1,cy2) = (incr' 0 cy1, incr' 0 cy2)
 
-toFO_ :: Functor f => Int -> Cy_ f Int -> CyFO Level f
-toFO_ cnt (Cy f) = CyFO (toFO_ (cnt+1) (f cnt))
-toFO_ cnt (D d)  = DFO $ fmap (toFO_ cnt) d
-toFO_ cnt (Var v) = VarFO v 
+fold2' :: (Fold f, Functor g1, Functor g2) => 
+    Cata f (Cy g1, Cy g2)
+    -> [(Cy g1, Cy g2)] 
+    -> Cy f 
+    -> (Cy g1, Cy g2)
+fold2' cata vars (Cy f)  = 
+    -- bekic
+    let (_,s0) = fold2' cata ((Var 0, Var 0) : map incr vars) f
+        (t,_)  = fold2' cata ((Var 0, Cy s0) : map incr vars) f
+        (_,s)  = fold2' cata ((Cy t, Var 0) : map incr vars) f
+    in (Cy t, Cy s)
+fold2' cata vars (D y)   = 
+    elimF cata (fold2' cata vars) y
+fold2' _    vars (Var n)
+    | n < length vars - 1 
+                       = (Var n, Var n)
+    | length vars - 1 <= n && n < length vars * 2 - 1
+                       = vars !! (n - length vars + 1)
+    | otherwise        = error "fold2: impossible - unbound recursion var"
 
-fromFO_ :: Functor f => [v] -> CyFO Idx f -> Cy_ f v
-fromFO_ vars (CyFO c)  = Cy (\v -> fromFO_ (v:vars) c)
-fromFO_ vars (DFO c)   = D $ fmap (fromFO_ vars) c
-fromFO_ vars (VarFO n) = Var (vars !! n)
+fold2 :: (Fold f, Fold g1, Fold g2) => Cata f (Cy g1, Cy g2) -> Cy f -> (Cy g1, Cy g2)
+fold2 cata cy = let (x,y) = fold2' cata [] cy in (clean0 x, clean0 y)
 
-fromFO :: Functor f => CyFO Idx f -> Cy f
-fromFO c = MakeCy (fromFO_ [] c)
+fvars :: Fold f => Cy f -> [Int]
+fvars (Cy f)  = filter (/=0) (fvars f)
+fvars (D y)   = elimF collectF fvars y
+fvars (Var v) = [v]
 
-levelToIdx :: Functor f => Int -> CyFO Level f -> CyFO Idx f
-levelToIdx cnt (CyFO c)  = CyFO (levelToIdx (cnt+1) c)
-levelToIdx cnt (DFO c)   = DFO $ fmap (levelToIdx cnt) c
-levelToIdx cnt (VarFO n) = VarFO (cnt - n - 1)
+-- clean up unused bindings
+clean0 :: Fold f => Cy f -> Cy f
+clean0 (Cy f) = if 0 `elem` fvars f then Cy f else f
+clean0 (D y)  = D $ fmap clean0 y
+clean0 (Var v) = Var v
 
-showCyFORaw :: ((CyFO db f -> String) -> f (CyFO db f) -> String) -> CyFO db f -> String
-showCyFORaw showD (CyFO c) = 
-    "cy(. " ++ showCyFORaw showD c ++ ")"
-showCyFORaw showD (DFO c) =
-    showD (showCyFORaw showD) c
-showCyFORaw _     (VarFO n) =
-    "_" ++ show n
+-- print w/ De Bruijn indices
+showCyRaw :: Fold f => Cata f String -> Cy f -> String
+showCyRaw cata (Cy f)   = "cy(. " ++ showCyRaw cata f ++ ")"
+showCyRaw cata (D c)    = elimF cata (showCyRaw cata) c
+showCyRaw _    (Var n) = "Var " ++ show n
 
-showCyFO :: Int -> ((CyFO Idx f -> String) -> f (CyFO Idx f) -> String) -> CyFO Idx f -> String
-showCyFO cnt showD (CyFO c) = 
-    let var = "x" ++ show cnt in
-    "cy(" ++ var ++ ". " ++ showCyFO (cnt+1) showD c ++ ")"
-showCyFO cnt showD (DFO c) =
-    showD (showCyFO cnt showD) c
-showCyFO cnt _     (VarFO n) =
-    "x" ++ show (cnt - n)
+-- standard printing
+showCy' :: Fold f => Int -> Cata f String -> Cy f -> String
+showCy' cnt cata (Cy f)   = "cy(x" ++ show cnt ++ ". " ++ showCy' (cnt+1) cata f ++ ")"
+showCy' cnt cata (D c)    = elimF cata (showCy' cnt cata) c
+showCy' cnt _    (Var n) = "x" ++ show (cnt - n - 1)
 
-showIListFO :: CyFO Idx IListF -> String
-showIListFO = showCyFO 0 (\showD (Cons x xs) -> "Cons(" ++ show x ++ ", " ++ showD xs ++ ")")
+showCy = showCy' 0
 
-showIListFORaw :: CyFO db IListF -> String
-showIListFORaw = showCyFORaw (\showD (Cons x xs) -> "Cons(" ++ show x ++ ", " ++ showD xs ++ ")")
+showIList :: Cy IListF -> String
+showIList = showCy showListF
 
+inf12 = Cy (D $ Cons 1 (D $ Cons 2 $ Var 0))
+
+inf23 = fold (ListC (\x r -> D $ Cons (x+1) r)) inf12
+
+tailcy = ListC (\k (x,y) -> (y, D $ Cons k y))
+
+inf21_ = fold2 tailcy inf12
 
 main = do
-    print $ showIList inf12
-    print $ showIList inf34
-
+    print $ showCyRaw showListF inf12
+    print $ showIList inf23
+    print $ showIList $ fst inf21_
+    print $ showIList $ snd inf21_
 -- *Main> main
 -- "cy(x0.Cons(1,Cons(2,x0)))"
 -- "cy(x0.Cons(2,Cons(3,x0)))"
 -- *Main> 
+
+
+
+-- Statically checked de Bruijn indices
+
+data N = Z_ | S_ N
+
+data Idx n where
+    Z :: Idx n
+    S :: Idx n -> Idx (S_ n)
+
+data CyN (n :: N) f where
+    CyN :: CyN (S_ n) f -> CyN n f
+    DN :: f (CyN n f) -> CyN n f
+    VarN :: Idx n -> CyN (S_ n) f
+
+data TreeF t = Node Int t t
+
+inft1 = CyN $ DN $ Node 1 (VarN Z) $ VarN (S Z)
