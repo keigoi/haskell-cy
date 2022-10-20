@@ -15,14 +15,14 @@ data Cy f =
 class Functor f => FoldCy (f :: * -> *) where
     data Cata f a
     collectF :: Monoid a => Cata f a
-    elimCy :: Cata f a -> (Cy f -> a) -> f (Cy f) -> a
+    elimF :: Cata f a -> (t -> a) -> f t -> a
 
 class FoldCy f => ShowFoldCy f where
     showF :: Cata f String
 
 fold :: FoldCy f => Cata f (Cy g) -> Cy f -> Cy g
 fold cata (Cy f)   = Cy (fold cata f)
-fold cata (D y)    = elimCy cata (fold cata) y
+fold cata (D y)    = elimF cata (fold cata) y
 fold _    (Var v)  = Var v
 
 incr' :: Functor f => Int -> Cy f -> Cy f
@@ -45,7 +45,7 @@ fold2' cata vars (Cy f)  =
         (_,s)  = fold2' cata ((Cy t, Var 0) : map incrVars vars) f
     in (Cy t, Cy s)
 fold2' cata vars (D y)   = 
-    elimCy cata (fold2' cata vars) y
+    elimF cata (fold2' cata vars) y
 fold2' _    vars (Var n)
     | n < length vars - 1 
                        = (Var n, Var n)
@@ -58,7 +58,7 @@ fold2 cata cy = let (x,y) = fold2' cata [] cy in (clean0 x, clean0 y)
 
 fvars :: FoldCy f => Cy f -> [Int]
 fvars (Cy f)  = filter (/=0) (fvars f)
-fvars (D y)   = elimCy collectF fvars y
+fvars (D y)   = elimF collectF fvars y
 fvars (Var v) = [v]
 
 -- clean up unused bindings
@@ -70,13 +70,13 @@ clean0 (Var v) = Var v
 -- print w/ De Bruijn indices
 showCyRaw :: FoldCy f => Cata f String -> Cy f -> String
 showCyRaw cata (Cy f)   = "cy(. " ++ showCyRaw cata f ++ ")"
-showCyRaw cata (D c)    = elimCy cata (showCyRaw cata) c
+showCyRaw cata (D c)    = elimF cata (showCyRaw cata) c
 showCyRaw _    (Var n) = "Var " ++ show n
 
 -- standard printing
 showCy' :: ShowFoldCy f => Int -> Cy f -> String
 showCy' cnt (Cy f)   = "cy(x" ++ show cnt ++ ". " ++ showCy' (cnt+1) f ++ ")"
-showCy' cnt (D c)    = elimCy showF (showCy' cnt) c
+showCy' cnt (D c)    = elimF showF (showCy' cnt) c
 showCy' cnt (Var n) = "x" ++ show (cnt - n - 1)
 
 showCy :: Cy IListF -> String
@@ -88,7 +88,7 @@ data IListF x = Cons Int x deriving Functor
 instance FoldCy IListF where
     newtype Cata IListF a = ListC (Int -> a -> a)
     collectF = ListC (const id)
-    elimCy (ListC cata) self (Cons x xs) = cata x (self xs)
+    elimF (ListC cata) self (Cons x xs) = cata x (self xs)
 
 instance ShowFoldCy IListF where
     showF = ListC (\k s -> "Cons(" ++ show k ++ "," ++ s ++ ")")
