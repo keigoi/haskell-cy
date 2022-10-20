@@ -1,6 +1,7 @@
 {-# LANGUAGE Rank2Types, TypeFamilies, DataKinds, DeriveFunctor, TypeOperators #-}
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 {-# HLINT ignore "Avoid lambda" #-}
+{-# LANGUAGE GADTs #-}
 
 -- a currently failing attempt to model using PHOAS
 
@@ -200,3 +201,21 @@ main = do
 -- "cy(x0.Cons(1,Cons(2,x0)))"
 -- "cy(x0.Cons(2,Cons(3,x0)))"
 -- *Main> 
+
+
+-- Statically checked de Bruijn indices
+
+data N = Z_ | S_ N
+
+data Idx n where
+    Z :: Idx n
+    S :: Idx n -> Idx (S_ n)
+
+data CyN (n :: N) f where
+    CyN :: CyN (S_ n) f -> CyN n f
+    DN :: f (CyN n f) -> CyN n f
+    VarN :: Idx n -> CyN (S_ n) f
+
+data TreeF t = Node Int t t
+
+inft1 = CyN $ DN $ Node 1 (VarN Z) $ VarN (S Z)
