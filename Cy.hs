@@ -8,13 +8,16 @@ class Functor f => Fold (f :: * -> *) where
     collectF :: Monoid a => Cata f a
     elimF :: Cata f a -> (Cy f -> a) -> f (Cy f) -> a
 
+class Fold f => ShowFold f where
+    showF :: Cata f String
+
 instance Fold IListF where
     newtype Cata IListF a = ListC (Int -> a -> a)
     collectF = ListC (const id)
     elimF (ListC cata) self (Cons x xs) = cata x (self xs)
 
-showListF :: Cata IListF [Char]
-showListF = ListC (\k s -> "Cons(" ++ show k ++ "," ++ s ++ ")")
+instance ShowFold IListF where
+    showF = ListC (\k s -> "Cons(" ++ show k ++ "," ++ s ++ ")")
 
 -- first order binding (either w/ DeBruijn index or level)
 data Cy f =
@@ -79,15 +82,12 @@ showCyRaw cata (D c)    = elimF cata (showCyRaw cata) c
 showCyRaw _    (Var n) = "Var " ++ show n
 
 -- standard printing
-showCy' :: Fold f => Int -> Cata f String -> Cy f -> String
-showCy' cnt cata (Cy f)   = "cy(x" ++ show cnt ++ ". " ++ showCy' (cnt+1) cata f ++ ")"
-showCy' cnt cata (D c)    = elimF cata (showCy' cnt cata) c
-showCy' cnt _    (Var n) = "x" ++ show (cnt - n - 1)
+showCy' :: ShowFold f => Int -> Cy f -> String
+showCy' cnt (Cy f)   = "cy(x" ++ show cnt ++ ". " ++ showCy' (cnt+1) f ++ ")"
+showCy' cnt (D c)    = elimF showF (showCy' cnt) c
+showCy' cnt (Var n) = "x" ++ show (cnt - n - 1)
 
 showCy = showCy' 0
-
-showIList :: Cy IListF -> String
-showIList = showCy showListF
 
 inf12 = Cy (D $ Cons 1 (D $ Cons 2 $ Var 0))
 
@@ -98,10 +98,10 @@ tailcy = ListC (\k (x,y) -> (y, D $ Cons k y))
 inf21_ = fold2 tailcy inf12
 
 main = do
-    print $ showCyRaw showListF inf12
-    print $ showIList inf23
-    print $ showIList $ fst inf21_
-    print $ showIList $ snd inf21_
+    print $ showCy inf12
+    print $ showCy inf23
+    print $ showCy $ fst inf21_
+    print $ showCy $ snd inf21_
 -- *Main> main
 -- "cy(x0.Cons(1,Cons(2,x0)))"
 -- "cy(x0.Cons(2,Cons(3,x0)))"
