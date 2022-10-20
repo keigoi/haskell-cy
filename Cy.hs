@@ -1,4 +1,5 @@
 {-# LANGUAGE Rank2Types, TypeFamilies, DataKinds, DeriveFunctor, GADTs, NamedFieldPuns #-}
+import Data.Maybe (fromMaybe)
 
 -- A (partial) implementation of M. Hamana's cy rewriting system:
 -- Cyclic Datatypes modulo Bisimulation based on Second-Order Algebraic Theories
@@ -44,6 +45,9 @@ shiftFVar f = shiftFVar' f 0
 
 incrFVar :: Functor f => Cy f -> Cy f
 incrFVar = shiftFVar (+1)
+
+decrFVar :: Functor f => Cy f -> Cy f
+decrFVar = shiftFVar (\i -> i - 1)
 
 incrFVarPair :: (Functor g1, Functor g2) => (Cy g1, Cy g2) -> (Cy g1, Cy g2)
 incrFVarPair (cy1,cy2) = (incrFVar cy1, incrFVar cy2)
@@ -132,7 +136,7 @@ freeVars (Var v) = [v]
 
 -- clean up unused bindings
 clean0 :: FoldCy f => Cy f -> Cy f
-clean0 (Cy f) = if 0 `elem` freeVars f then Cy f else f
+clean0 (Cy f) = if 0 `elem` freeVars f then Cy f else decrFVar f
 clean0 (D y)  = D $ fmap clean0 y
 clean0 (Var v) = Var v
 
@@ -178,24 +182,39 @@ instance FoldCy CStringF where
     Or s1 s2 -> caseOr (self s1) (self s2)
 
 class FoldAxBr (f :: * -> *) where
-    axBr :: Cy f -> Cy f
+    axBr :: Cy f -> Maybe (Cy f)
     brUnit :: f t
+
+tryAxBr_ s = Just $ fromMaybe s (axBr s)
+
+tryAxBr s = fromMaybe s (axBr s)
 
 instance FoldAxBr CStringF where
     brUnit = Eps
     axBr (Cy f) =
-      let free cy = shiftFVar (\x -> x-1) cy in
-      case axBr f of
-        D (Or s1 (Var 0)) | 0 `notElem` freeVars s1 -> free s1 -- (11r)
-        D (Or (Var 0) s1) | 0 `notElem` freeVars s1 -> free s1 -- (12r)
-        s | 0 `notElem` freeVars s -> free s  -- (13r)
-        Var 0 -> D brUnit -- (14r)
-        s -> Cy s
-    axBr (D (Or s1 (D Eps))) = axBr s1 -- (15r)
-    axBr (D (Or (D Eps) s2)) = axBr s2 -- (16r)
-    axBr (D (A s)) = D (A $ axBr s)
-    axBr (D (B s)) = D (B $ axBr s)
-    axBr s = s
+        case axBr f of
+            Just cy -> 
+                Just $ fromMaybe (Cy f) (fvarRules cy)
+            Nothing -> fvarRules f
+      where 
+        fvarRules cy =
+            case cy of
+                D (Or s1 (Var 0)) | 0 `notElem` freeVars s1 -> return $ decrFVar s1 -- (11r)
+                D (Or (Var 0) s1) | 0 `notElem` freeVars s1 -> return $ decrFVar s1 -- (12r)
+                s | 0 `notElem` freeVars s -> return $ decrFVar s  -- (13r)
+                Var 0 -> return $ D brUnit -- (14r)
+                _ -> Nothing
+    axBr (D (Or s1 (D Eps))) = tryAxBr_ s1 -- (15r)
+    axBr (D (Or (D Eps) s2)) = tryAxBr_ s2 -- (16r)
+    axBr (D (Or s1 s2)) = 
+        case (axBr s1, axBr s2) of 
+            (Nothing, Nothing) -> Nothing
+            (Just s1, Just s2) -> tryAxBr_ $ D $ Or s1 s2
+            (Nothing, Just s2) -> tryAxBr_ $ D $ Or s1 s2
+            (Just s1, Nothing) -> tryAxBr_ $ D $ Or s1 s2
+    axBr (D (A s)) = D . A <$> axBr s
+    axBr (D (B s)) = D . B <$> axBr s
+    axBr s = Nothing
 
 instance ShowFoldCy CStringF where
     showF = CStringC {caseA= \s->"a("++s++")", caseB= \s -> "b("++s++")", caseEps="ε", caseOr= \s1 s2 -> "("++s1++"|"++s2++")"}
@@ -216,18 +235,28 @@ instance ShowFoldCy ABoolF where
 -- FIXME
 instance FoldAxBr ABoolF where
     brUnit = False_
-    axBr (Cy f) =
-      let free cy = shiftFVar (\x -> x-1) cy in
-      case axBr f of
-        D (Or_ s1 (Var 0)) | 0 `notElem` freeVars s1 -> free s1
-        D (Or_ (Var 0) s1) | 0 `notElem` freeVars s1 -> free s1
-        s | 0 `notElem` freeVars s -> free s
-        Var 0 -> D brUnit
-        s -> Cy s
-    axBr (D (Or_ s1 (D False_))) = axBr s1
-    axBr (D (Or_ (D False_) s2)) = axBr s2
-    axBr (D (Or_ s1 s2)) = D $ Or_ (axBr s1) (axBr s2)
-    axBr s = s
+    axBr (Cy f) = do
+        case axBr f of
+            Just cy -> 
+                Just $ fromMaybe (Cy f) (fvarRules cy)
+            Nothing -> fvarRules f
+      where 
+        fvarRules cy =
+            case cy of
+                D (Or_ s1 (Var 0)) | 0 `notElem` freeVars s1 -> return $ decrFVar s1 -- (11r)
+                D (Or_ (Var 0) s1) | 0 `notElem` freeVars s1 -> return $ decrFVar s1 -- (12r)
+                s | 0 `notElem` freeVars s -> return $ decrFVar s  -- (13r)
+                Var 0 -> return $ D brUnit -- (14r)
+                _ -> Nothing
+    axBr (D (Or_ s1 (D False_))) = tryAxBr_ s1
+    axBr (D (Or_ (D False_) s2)) = tryAxBr_ s2
+    axBr (D (Or_ s1 s2)) = do
+        case (axBr s1, axBr s2) of 
+            (Nothing, Nothing) -> Nothing
+            (Just s1, Just s2) -> tryAxBr_ $ D $ Or_ s1 s2
+            (Nothing, Just s2) -> tryAxBr_ $ D $ Or_ s1 s2
+            (Just s1, Nothing) -> tryAxBr_ $ D $ Or_ s1 s2
+    axBr _ = Nothing
 
 headIsA' = CStringC {
         caseA = const $ D True_,
@@ -243,9 +272,7 @@ isAA' = CStringC {
         caseOr = \(v1,w1) (v2,w2) -> (D $ Or_ v1 v2, D $ Or w1 w2) -- TODO
     }
 
-isAA = axBr . axBr . fst . fold2 isAA'
-
--- b(a(a(b(ε))))
+isAA = tryAxBr . fst . fold2 isAA'
 
 testIsAA cy = do
     putStrLn $ "term: " ++ showCy cy
@@ -296,4 +323,3 @@ main = do
 -- isAA> true
 -- term: a((cy(x0. b(cy(x1. a(x1))))|a(ε)))
 -- isAA> (true \/ cy(x0. (x0 \/ x0)))
-
