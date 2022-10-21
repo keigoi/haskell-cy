@@ -4,7 +4,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 import Data.Maybe (fromMaybe)
 
--- An (partial) implementation of M. Hamana's FOLDr rewriting system on cyclic data:
+-- An (partial) implementation of Makoto Hamana's FOLDr rewriting system on cyclic data:
 -- Cyclic Datatypes modulo Bisimulation based on Second-Order Algebraic Theories
 -- Logical Methods in Computer Science, November 15, 2017, Volume 13, Issue 4
 -- https://doi.org/10.23638/LMCS-13(4:8)2017
@@ -141,8 +141,9 @@ instance (FoldCy g, FoldCyTup gs) => FoldCyTup (g :+ gs) where
     incrFVarTup ((:+) cy1 cys) = (:+) (incrFVar cy1) (mapTup incrFVar cys)
     foldCyTup' elimTup vars (Cy f)  =
         -- many-arg Bekič!
-        let (_ :+ ss0) = foldCyTup' elimTup ((:+) (Var 0) (genVars 0) : map incrFVarTup vars) f
-            (t :+ _)   = foldCyTup' elimTup ((:+) (Var 0) (genCys ss0) : map incrFVarTup vars) f
+        let vars' = map incrFVarTup vars
+            (_ :+ ss0) = foldCyTup' elimTup ((Var 0 :+ genVars 0) : vars') f
+            (t :+ _)   = foldCyTup' elimTup ((Var 0 :+ genCys ss0) : vars') f
             -- and decomposing the rest of the tuple, recursively
             ss  = foldCyTup' (tie t elimTup) (genVars 0 : map (tailTup . incrFVarTup) vars) f
         in Cy t :+ genCys ss
@@ -184,7 +185,7 @@ unconvTupCases :: ConvTup tup => ElimF f tup -> ElimF f (CyTup (Conv tup))
 unconvTupCases elimF self cyf = unconvTup $ elimF (convTup . self) cyf
 
 foldCyMany :: (FoldCy f, ConvTup tup, FoldCyTup (Conv tup)) => Cases f tup -> Cy f -> tup
-foldCyMany cata = 
+foldCyMany cata =
     let elim = unconvTupCases (elimF cata) in
     convTup . mapTup clean0 . foldCyTup' elim []
 
@@ -354,11 +355,74 @@ testIsAA cy = do
     putStrLn $ "isAA> " ++ showCy (isAA cy)
 
 
+
+{- 
+   Additional test-bed which directly encode finite-state automata using cy.
+   We are trying to 'determinise' the automata there ...
+-}
+
+-- specification (acyclic)
+data AutSpec =
+    TransS Char AutSpec
+    | AcceptS
+    | DeadS
+    | ChoiceS AutSpec AutSpec
+    deriving Show
+
+mergeTransS :: Char -> AutSpec -> AutSpec -> AutSpec
+mergeTransS c1 aut1 (TransS c2 aut2)  =
+    if c1==c2 then
+        TransS c1 (mergeS aut1 aut2)
+    else
+        ChoiceS (TransS c1 (detS aut1)) (TransS c2 (detS aut2))
+mergeTransS c1 aut1 AcceptS = ChoiceS (TransS c1 (detS aut1)) AcceptS
+mergeTransS c1 aut1 DeadS = TransS c1 aut1
+mergeTransS c1 aut1 (ChoiceS aut21 aut22) = mergeS (mergeTransS c1 aut1 aut21) (mergeTransS c1 aut1 aut22)
+
+mergeS :: AutSpec -> AutSpec -> AutSpec
+mergeS (TransS c1 aut1) aut2 = mergeTransS c1 aut1 aut2
+mergeS AcceptS aut2 = ChoiceS AcceptS (detS aut2)
+mergeS DeadS aut2 = aut2
+mergeS (ChoiceS aut11 aut12) aut2 = mergeS (mergeS aut11 aut2) (mergeS aut12 aut2)
+
+detS :: AutSpec -> AutSpec
+detS (TransS c aut) = TransS c $ detS aut
+detS AcceptS = AcceptS
+detS DeadS = DeadS
+detS (ChoiceS aut1 aut2) = mergeS aut1 aut2
+
+-- paramorphism
+data AutSpecPara a = AutSpecPara {
+        caseTransS :: Char -> AutSpec -> a -> a,
+        caseAcceptS :: a,
+        caseDeadS :: a,
+        caseChoiceS :: AutSpec -> AutSpec -> a -> a -> a
+    }
+
+detPara = AutSpecPara {
+    caseTransS  = \c s (r,m,_) -> 
+                  (TransS c undefined{-mを全部マージ-}, [TransS c s], undefined),
+    caseAcceptS = (AcceptS, [AcceptS], undefined),
+    caseDeadS   = (DeadS, [], undefined),
+    caseChoiceS = \s1 s2 (r1,m1,_) (r2,m2,_) -> 
+                  (ChoiceS r1 r2, m1++m2, undefined)
+}
+
+paraAutSpec :: AutSpecPara p -> AutSpec -> p
+paraAutSpec f@AutSpecPara {caseTransS} (TransS c s) = caseTransS c s (paraAutSpec f s)
+paraAutSpec AutSpecPara {caseAcceptS} AcceptS = caseAcceptS
+paraAutSpec AutSpecPara {caseDeadS} DeadS = caseDeadS
+paraAutSpec f@AutSpecPara {caseChoiceS} (ChoiceS s t) = caseChoiceS s t (paraAutSpec f s) (paraAutSpec f t)
+
+{-
+    Automata, using cy!
+-}
+
 data AutF t =
     (:->) Char t
     | Accept
     | Dead
-    | Choice t t
+    | (:++:) t t
     deriving Functor
 
 infixr 3 :->
@@ -377,14 +441,14 @@ instance FoldCy AutF where
             c :-> t -> caseTrans c $ self t
             Accept -> caseAccept
             Dead -> caseDead
-            Choice t1 t2 -> caseChoice (self t1) (self t2)
+            t1 :++: t2 -> caseChoice (self t1) (self t2)
 
 instance ShowFoldCy AutF where
     showF = AutC {
         caseTrans = \c t -> "-" ++ [c] ++ "->" ++ t,
         caseAccept = "1",
         caseDead = "0",
-        caseChoice = \t1 t2 -> "(" ++ t1 ++ " + " ++ t2 ++ ")"
+        caseChoice = \t1 t2 -> "(" ++ t1 ++ " ++ " ++ t2 ++ ")"
     }
 
 instance FoldAxBr AutF where
@@ -397,75 +461,79 @@ instance FoldAxBr AutF where
       where
         fvarRules cy =
             case cy of
-                D (Choice s1 (Var 0)) | 0 `notElem` freeVars s1 -> return $ decrFVar s1 -- (11r)
-                D (Choice (Var 0) s1) | 0 `notElem` freeVars s1 -> return $ decrFVar s1 -- (12r)
+                D (s1 :++: Var 0) | 0 `notElem` freeVars s1 -> return $ decrFVar s1 -- (11r)
+                D (Var 0 :++: s1) | 0 `notElem` freeVars s1 -> return $ decrFVar s1 -- (12r)
                 s | 0 `notElem` freeVars s -> return $ decrFVar s  -- (13r)
                 Var 0 -> return $ D brUnit -- (14r)
                 _ -> Nothing
-    axBr (D (Choice s1 (D Dead))) = tryAxBr_ s1
-    axBr (D (Choice (D Dead) s2)) = tryAxBr_ s2
-    axBr (D (Choice s1 s2)) = do
+    axBr (D (s1 :++: D Dead)) = tryAxBr_ s1
+    axBr (D (D Dead :++: s2)) = tryAxBr_ s2
+    axBr (D (s1 :++: s2)) = do
         case (axBr s1, axBr s2) of
             (Nothing, Nothing) -> Nothing
-            (Just s1, Just s2) -> tryAxBr_ $ D $ Choice s1 s2
-            (Nothing, Just s2) -> tryAxBr_ $ D $ Choice s1 s2
-            (Just s1, Nothing) -> tryAxBr_ $ D $ Choice s1 s2
+            (Just s1, Just s2) -> tryAxBr_ $ D $ s1 :++: s2
+            (Nothing, Just s2) -> tryAxBr_ $ D $ s1 :++: s2
+            (Just s1, Nothing) -> tryAxBr_ $ D $ s1 :++: s2
     axBr _ = Nothing
 
-data AutSpec =
-    TransS Char AutSpec
-    | AcceptS
-    | DeadS
-    | ChoiceS AutSpec AutSpec
-    deriving Show
 
-(|->) :: Char -> AutSpec -> AutSpec
-(|->) = TransS
+{-
+    A (currently-failing attempt of) determinisation algorithm using fold on cy.
+-}
 
-infixr 3 |->
+mergeTransC :: Char -> Cy AutF -> Cases AutF (Cy AutF, Cy AutF)
+mergeTransC c1 aut1 = AutC {
+    caseTrans = \c2 (_, t) ->
+        (if c1==c2 then
+            D $ c1 :-> merge aut1 t
+        else
+            -- merging two edges into one, continue to determinise the following states?
+            -- the main problem here is a thoughtless use of mutual recursion
+            -- which must also be eliminated by using fold.
+            D $ D (c1 :-> {-det-} aut1) :++: D (c2 :-> {-det-} t),
+        D (c2 :-> t)),
+    caseAccept =
+        (D $ D (c1 :-> aut1) :++: D Accept, D Accept),
+    caseDead =
+        (D $ c1 :-> aut1, D Dead),
+    caseChoice = \(_,t) (_,s) ->
+        (merge (mergeTrans c1 aut1 t) (mergeTrans c1 aut1 s), D $ t :++: s)
+}
 
-mergeTransS :: Char -> AutSpec -> AutSpec -> AutSpec
-mergeTransS c1 aut1 (TransS c2 aut2)  =
-    if c1==c2 then
-        TransS c1 (mergeS aut1 aut2)
-    else
-        ChoiceS (TransS c1 (detS aut1)) (TransS c2 (detS aut2))
-mergeTransS c1 aut1 (ChoiceS aut21 aut22) = mergeS (mergeTransS c1 aut1 aut21) (mergeTransS c1 aut1 aut22)
-mergeTransS c1 aut1 AcceptS = ChoiceS (TransS c1 (detS aut1)) AcceptS
-mergeTransS c1 aut1 DeadS = DeadS
+mergeTrans c1 aut1 aut2 = fst $ foldCy2 (mergeTransC c1 aut1) aut2
 
-mergeS :: AutSpec -> AutSpec -> AutSpec
-mergeS (TransS c1 aut1) aut2 = mergeTransS c1 aut1 aut2
-mergeS (ChoiceS aut11 aut12) aut2 = mergeS (mergeS aut11 aut2) (mergeS aut12 aut2)
-mergeS AcceptS aut2 = ChoiceS AcceptS (detS aut2)
-mergeS DeadS _ = DeadS
 
-detS :: AutSpec -> AutSpec
-detS (TransS c aut) = TransS c $ detS aut
-detS (ChoiceS aut1 aut2) = mergeS aut1 aut2
-detS AcceptS = AcceptS
-detS DeadS = DeadS
+merge aut1 aut2 = fst $ foldCy2 (mergeC aut2) aut1
 
--- merge :: Cy AutF -> Cases AutF (Cy AutF, Cy AutF)
--- merge aut1 = AutC {
---     caseTrans = \c (s,t) -> (D $ c :-> s, D $ c :-> t),
---     caseAccept = (D Accept, D Accept),
---     caseDead = (D Dead, D Dead),
---     caseChoice = \(s1,t1) (s2,t2) ->
---         (D $ Choice s1 s2, D $ Choice s1 s2)
--- }
+mergeC :: Cy AutF -> Cases AutF (Cy AutF, Cy AutF)
+mergeC aut2 = AutC {
+    caseTrans = \c (_, t) ->
+        (fst $ foldCy2 (mergeTransC c t) aut2, D (c :-> t)),
+    caseAccept =
+        (D $ D Accept :++: aut2, D Accept),
+    caseDead =
+        (aut2, D Dead),
+    caseChoice = \(_,t) (_,s) ->
+        (merge (merge t aut2) (merge s aut2) , D $ t :++: s)
+}
 
--- det :: Cases AutF (Cy AutF, Cy AutF)
--- det = AutC {
---         caseTrans = \c (u, t) ->
---             (D (c :-> u), D $ c :-> t),
---         caseAccept =
---             (D Accept, D Accept),
---         caseDead =
---             (D Dead, D Dead),
---         caseChoice = \(s1,t1) (s2,t2) ->
---             (fst (foldCy2 (merge t1) t2), D $ Choice t1 t2)
---     }
+detC :: Cases AutF (Cy AutF, Cy AutF)
+detC = AutC {
+        caseTrans = \c (_, t) ->
+            (D (c :-> t), D (c :-> t)),
+        caseAccept =
+            (D Accept, D Accept),
+        caseDead =
+            (D Dead, D Dead),
+        caseChoice = \(_,t) (_,s) ->
+            (fst $ foldCy2 (mergeC s) t, D $ t :++: s)
+    }
+
+det = fst . foldCy2 detC
+
+testDet aut = do
+    putStrLn $ "automata: " ++ showCy aut
+    putStrLn $ "det> " ++ showCy (det aut)
 
 
 main = do
@@ -490,6 +558,12 @@ main = do
     testIsAA (a $ Cy $ b $ b $ Var 0)
     testIsAA (a $ b $ Cy $ a $ Var 0)
     testIsAA (a (Cy (b $ Cy $ a $ Var 0) `or_` a eps)) -- FIXME (true \/ cy(x0. (x0 \/ x0)))
+    putStrLn ""
+
+    -- automata examples (ongoing, does not work properly yet)
+    testDet $ Cy $ D (D ('a' :-> D ('b' :-> D ('a' :-> Var 0))) :++: D ('a' :-> D ('b' :-> D ('c' :-> D Accept))))
+    testDet $ Cy $ D (D ('a' :-> D ('b' :-> Var 0)) :++: D ('a' :-> D ('c' :-> D Accept)))
+    testDet $ D (D ('a' :-> Cy (D ('b' :-> Var 0))) :++: D ('a' :-> D ('c' :-> D Accept)))
 
 -- *Main> main
 -- cy(x0. Cons(1,Cons(2,x0)))
@@ -516,3 +590,10 @@ main = do
 -- isAA> true
 -- term: a((cy(x0. b(cy(x1. a(x1))))|a(ε)))
 -- isAA> (true \/ cy(x0. (x0 \/ x0)))
+
+-- automata: cy(x0. (-a->-b->x0 ++ -a->-c->1))
+-- det> -a->-b->(-a->cy(x0. (-a->-b->-a->x0 ++ -a->-b->-c->1)) ++ -c->1)
+-- automata: (-a->cy(x0. -b->x0) ++ -a->-c->1)
+-- det> -a->(-b->cy(x0. (-a->-b->x0 ++ -a->-c->1)) ++ -c->1)
+-- automata: cy(x0. (-a->-b->-a->x0 ++ -a->-b->-c->1))
+-- det> -a->(-b->cy(x0. -b->x0) ++ -c->1)
