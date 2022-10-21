@@ -1,5 +1,7 @@
 {-# LANGUAGE Rank2Types, TypeFamilies, DataKinds, DeriveFunctor, GADTs, NamedFieldPuns #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE FlexibleContexts #-}
 import Data.Maybe (fromMaybe)
 
 -- An (partial) implementation of M. Hamana's FOLDr rewriting system on cyclic data:
@@ -36,10 +38,10 @@ showCyRaw cata (D c)   = elimF cata (showCyRaw cata) c
 showCyRaw _    (Var n) = "Var " ++ show n
 
 -- A unary fold
-fold :: FoldCy f => Cases f (Cy g) -> Cy f -> Cy g
-fold cata (Cy f)   = Cy (fold cata f)
-fold cata (D y)    = elimF cata (fold cata) y
-fold _    (Var v)  = Var v
+foldCy :: FoldCy f => Cases f (Cy g) -> Cy f -> Cy g
+foldCy cata (Cy f)   = Cy (foldCy cata f)
+foldCy cata (D y)    = elimF cata (foldCy cata) y
+foldCy _    (Var v)  = Var v
 
 shiftFVar' :: Functor f => (Int -> Int) -> Int -> Cy f -> Cy f
 shiftFVar' f cnt (Cy cy)  = Cy (shiftFVar' f (cnt+1) cy)
@@ -59,26 +61,26 @@ incrFVarPair :: (Functor g1, Functor g2) => (Cy g1, Cy g2) -> (Cy g1, Cy g2)
 incrFVarPair (cy1,cy2) = (incrFVar cy1, incrFVar cy2)
 
 -- fold generating pair of cyclic structures, using Bekič
-fold2' :: (FoldCy f, Functor g1, Functor g2) =>
+foldCy2' :: (FoldCy f, Functor g1, Functor g2) =>
     Cases f (Cy g1, Cy g2)
     -> [(Cy g1, Cy g2)]
     -> Cy f
     -> (Cy g1, Cy g2)
-fold2' cata env (Cy f)  =
+foldCy2' cata env (Cy f)  =
     -- Bekič
-    let (_,s0) = fold2' cata ((Var 0, Var 0) : map incrFVarPair env) f
-        (t,_)  = fold2' cata ((Var 0, Cy s0) : map incrFVarPair env) f
-        (_,s)  = fold2' cata ((Cy t, Var 0) : map incrFVarPair env) f
+    let (_,s0) = foldCy2' cata ((Var 0, Var 0) : map incrFVarPair env) f
+        (t,_)  = foldCy2' cata ((Var 0, Cy s0) : map incrFVarPair env) f
+        (_,s)  = foldCy2' cata ((Cy t, Var 0) : map incrFVarPair env) f
     in (Cy t, Cy s)
-fold2' cata env (D y)   = elimF cata (fold2' cata env) y
-fold2' _    env (Var n)
+foldCy2' cata env (D y)   = elimF cata (foldCy2' cata env) y
+foldCy2' _    env (Var n)
     | n < length env - 1 = (Var n, Var n) -- bound variable
-    | length env - 1 <= n && n < length env * 2 - 1  
+    | length env - 1 <= n && n < length env * 2 - 1
                          = env !! (n - length env + 1) -- free variable - looking up the env
     | otherwise          = error "fold2: impossible - unbound recursion var"
 
-fold2 :: (FoldCy f, FoldCy g1, FoldCy g2) => Cases f (Cy g1, Cy g2) -> Cy f -> (Cy g1, Cy g2)
-fold2 cata cy = let (x,y) = fold2' cata [] cy in (clean0 x, clean0 y)
+foldCy2 :: (FoldCy f, FoldCy g1, FoldCy g2) => Cases f (Cy g1, Cy g2) -> Cy f -> (Cy g1, Cy g2)
+foldCy2 cata cy = let (x,y) = foldCy2' cata [] cy in (clean0 x, clean0 y)
 
 data One (f :: * -> *)
 data (f :: * -> *) :+ gs
@@ -102,7 +104,7 @@ headTup (g :+ _) = g
 tailTup :: CyTup (f :+ gs) -> CyTup gs
 tailTup (_ :+ gs) = gs
 
-type ElimFTup f gs = (Cy f -> CyTup gs) -> f (Cy f) -> CyTup gs
+type ElimF f gs = (Cy f -> gs) -> f (Cy f) -> gs
 
 class FoldCyTup gs where
     mapTup  :: (forall g. FoldCy g => Cy g -> Cy g) -> CyTup gs -> CyTup gs
@@ -110,10 +112,10 @@ class FoldCyTup gs where
     genCys  :: CyTup gs -> CyTup gs
     incrFVarTup :: CyTup gs -> CyTup gs
     -- the many-arg fold
-    foldTup :: ElimFTup f gs -> [CyTup gs] -> Cy f -> CyTup gs
+    foldCyTup' :: ElimF f (CyTup gs) -> [CyTup gs] -> Cy f -> CyTup gs
 
 lookupVars :: FoldCyTup gs => [CyTup gs] -> Int -> CyTup gs
-lookupVars vars n 
+lookupVars vars n
     | n < length vars - 1 = genVars n
     | length vars - 1 <= n && n < length vars * 2 - 1
                           = vars !! (n - length vars + 1)
@@ -124,11 +126,11 @@ instance FoldCy g => FoldCyTup (One g) where
     genVars i = One $ Var i
     genCys (One g) = One $ Cy g
     incrFVarTup (One cy) = One $ incrFVar cy
-    foldTup elimFTup vars (Cy f)   = One $ Cy (unOne $ foldTup elimFTup vars f)
-    foldTup elimFTup vars (D y)    = elimFTup (foldTup elimFTup vars) y
-    foldTup _        vars (Var v)  = lookupVars vars v
+    foldCyTup' elimFTup vars (Cy f)   = One $ Cy (unOne $ foldCyTup' elimFTup vars f)
+    foldCyTup' elimFTup vars (D y)    = elimFTup (foldCyTup' elimFTup vars) y
+    foldCyTup' _        vars (Var v)  = lookupVars vars v
 
-tie :: Cy g -> ElimFTup f (g :+ gs) -> ElimFTup f gs
+tie :: Cy g -> ElimF f (CyTup (g :+ gs)) -> ElimF f (CyTup gs)
 tie g elimFTup f2gs fcyf =
     tailTup $ elimFTup (\cyf -> g :+ f2gs cyf) fcyf
 
@@ -137,18 +139,54 @@ instance (FoldCy g, FoldCyTup gs) => FoldCyTup (g :+ gs) where
     genVars i = (:+) (Var i) (genVars i)
     genCys ((:+) c cs) = (:+) (Cy c) (genCys cs)
     incrFVarTup ((:+) cy1 cys) = (:+) (incrFVar cy1) (mapTup incrFVar cys)
-    foldTup elimTup vars (Cy f)  =
+    foldCyTup' elimTup vars (Cy f)  =
         -- many-arg Bekič!
-        let (_ :+ ss0) = foldTup elimTup ((:+) (Var 0) (genVars 0) : map incrFVarTup vars) f
-            (t :+ _)   = foldTup elimTup ((:+) (Var 0) (genCys ss0) : map incrFVarTup vars) f
+        let (_ :+ ss0) = foldCyTup' elimTup ((:+) (Var 0) (genVars 0) : map incrFVarTup vars) f
+            (t :+ _)   = foldCyTup' elimTup ((:+) (Var 0) (genCys ss0) : map incrFVarTup vars) f
             -- and decomposing the rest of the tuple, recursively
-            ss  = foldTup (tie t elimTup) (genVars 0 : map (tailTup . incrFVarTup) vars) f
+            ss  = foldCyTup' (tie t elimTup) (genVars 0 : map (tailTup . incrFVarTup) vars) f
         in Cy t :+ genCys ss
-    foldTup elimTup vars (D y)   =  elimTup (foldTup elimTup vars) y
-    foldTup _       vars (Var v) = lookupVars vars v
+    foldCyTup' elimTup vars (D y)   =  elimTup (foldCyTup' elimTup vars) y
+    foldCyTup' _       vars (Var v) = lookupVars vars v
 
-foldMany :: (FoldCy f, FoldCy g, FoldCyTup gs) => Cases f (CyTup (g :+ gs)) -> Cy f -> CyTup (g :+ gs)
-foldMany cata = mapTup clean0 . foldTup (elimF cata) []
+foldCyTup :: (FoldCy f, FoldCy g, FoldCyTup gs) => Cases f (CyTup (g :+ gs)) -> Cy f -> CyTup (g :+ gs)
+foldCyTup cata = mapTup clean0 . foldCyTup' (elimF cata) []
+
+class ConvTup tup where
+    type Conv tup
+    convTup :: CyTup (Conv tup) -> tup
+    unconvTup :: tup -> CyTup (Conv tup)
+
+instance ConvTup (Cy g1, Cy g2) where
+    type Conv (Cy g1, Cy g2) =  (g1 :+ One g2)
+    convTup (g1 :+ One g2) = (g1, g2)
+    unconvTup (g1, g2) = g1 :+ One g2
+
+instance ConvTup (Cy g1, Cy g2, Cy g3) where
+    type Conv (Cy g1, Cy g2, Cy g3) =  (g1 :+ g2 :+ One g3)
+    convTup (g1 :+ g2 :+ One g3) = (g1, g2, g3)
+    unconvTup (g1, g2, g3) = g1 :+ g2 :+ One g3
+
+instance ConvTup (Cy g1, Cy g2, Cy g3, Cy g4) where
+    type Conv (Cy g1, Cy g2, Cy g3, Cy g4) =  (g1 :+ g2 :+ g3 :+ One g4)
+    convTup (g1 :+ g2 :+ g3 :+ One g4) = (g1, g2, g3, g4)
+    unconvTup (g1, g2, g3, g4) = g1 :+ g2 :+ g3 :+ One g4
+
+instance ConvTup (Cy g1, Cy g2, Cy g3, Cy g4, Cy g5) where
+    type Conv (Cy g1, Cy g2, Cy g3, Cy g4, Cy g5) =  (g1 :+ g2 :+ g3 :+ g4 :+ One g5)
+    convTup (g1 :+ g2 :+ g3 :+ g4 :+ One g5) = (g1, g2, g3, g4, g5)
+    unconvTup (g1, g2, g3, g4, g5) = g1 :+ g2 :+ g3 :+ g4 :+ One g5
+
+convTupCases :: ConvTup tup => ElimF f (CyTup (Conv tup)) -> ElimF f tup
+convTupCases elimF self cyf = convTup $ elimF (unconvTup . self) cyf
+
+unconvTupCases :: ConvTup tup => ElimF f tup -> ElimF f (CyTup (Conv tup))
+unconvTupCases elimF self cyf = unconvTup $ elimF (convTup . self) cyf
+
+foldCyMany :: (FoldCy f, ConvTup tup, FoldCyTup (Conv tup)) => Cases f tup -> Cy f -> tup
+foldCyMany cata = 
+    let elim = unconvTupCases (elimF cata) in
+    convTup . mapTup clean0 . foldCyTup' elim []
 
 freeVars :: FoldCy f => Cy f -> [Int]
 freeVars (Cy f)  = filter (/=0) (freeVars f)
@@ -191,13 +229,13 @@ inf12 :: Cy IListF
 inf12 = Cy (D $ Cons 1 (D $ Cons 2 $ Var 0))
 
 inf23 :: Cy IListF
-inf23 = fold (IListC (\x r -> D $ Cons (x+1) r)) inf12
+inf23 = foldCy (IListC (\x r -> D $ Cons (x+1) r)) inf12
 
 tailIL :: Cy IListF -> Cy IListF
-tailIL = fst . fold2 (IListC (\k (x,y) -> (y, D $ Cons k y)))
+tailIL = fst . foldCy2 (IListC (\k (x,y) -> (y, D $ Cons k y)))
 
 tailIL' :: Cy IListF -> CyTup (IListF :+ IListF :+ One IListF)
-tailIL' = foldMany (IListC (\k (_ :+ _ :+ One z) -> z :+ z :+ One (D (Cons k z))))
+tailIL' = foldCyTup (IListC (\k (_ :+ _ :+ One z) -> z :+ z :+ One (D (Cons k z))))
 
 tailIL2 :: Cy IListF -> Cy IListF
 tailIL2 = headTup . tailIL'
@@ -246,9 +284,9 @@ instance FoldAxBr CStringF where
 
 instance ShowFoldCy CStringF where
     showF = CStringC {
-        caseA= \s->"a("++s++")", 
-        caseB= \s -> "b("++s++")", 
-        caseEps="ε", 
+        caseA= \s->"a("++s++")",
+        caseB= \s -> "b("++s++")",
+        caseEps="ε",
         caseOr= \s1 s2 -> "("++s1++"|"++s2++")"
     }
 
@@ -264,8 +302,8 @@ instance FoldCy ABoolF where
 
 instance ShowFoldCy ABoolF where
     showF = ABoolC {
-        caseTrue="true", 
-        caseFalse="false", 
+        caseTrue="true",
+        caseFalse="false",
         caseOrB= \s1 s2 -> "(" ++ s1 ++ " \\/ " ++ s2 ++ ")"
     }
 
@@ -303,17 +341,131 @@ headIsA' = CStringC {
     }
 
 isAA' = CStringC {
-        caseA = \(v,w) -> (D $ Or_ (fold headIsA' w) v, D $ A w),
+        caseA = \(v,w) -> (D $ Or_ (foldCy headIsA' w) v, D $ A w),
         caseB = \(v,w) -> (v, D $ B w),
         caseEps = (D False_, D Eps),
         caseOr = \(v1,w1) (v2,w2) -> (D $ Or_ v1 v2, D $ Or w1 w2) -- TODO
     }
 
-isAA = tryAxBr . fst . fold2 isAA'
+isAA = tryAxBr . fst . foldCy2 isAA'
 
 testIsAA cy = do
     putStrLn $ "term: " ++ showCy cy
     putStrLn $ "isAA> " ++ showCy (isAA cy)
+
+
+data AutF t =
+    (:->) Char t
+    | Accept
+    | Dead
+    | Choice t t
+    deriving Functor
+
+infixr 3 :->
+
+instance FoldCy AutF where
+    data Cases AutF a =
+        AutC {
+            caseTrans :: Char -> a -> a,
+            caseAccept :: a,
+            caseDead :: a,
+            caseChoice :: a -> a -> a
+        }
+    collectF = AutC (const id) mempty mempty (<>)
+    elimF AutC {caseTrans, caseAccept, caseDead, caseChoice} self aut =
+        case aut of
+            c :-> t -> caseTrans c $ self t
+            Accept -> caseAccept
+            Dead -> caseDead
+            Choice t1 t2 -> caseChoice (self t1) (self t2)
+
+instance ShowFoldCy AutF where
+    showF = AutC {
+        caseTrans = \c t -> "-" ++ [c] ++ "->" ++ t,
+        caseAccept = "1",
+        caseDead = "0",
+        caseChoice = \t1 t2 -> "(" ++ t1 ++ " + " ++ t2 ++ ")"
+    }
+
+instance FoldAxBr AutF where
+    brUnit = Dead
+    axBr (Cy f) = do
+        case axBr f of
+            Just cy ->
+                Just $ fromMaybe (Cy f) (fvarRules cy)
+            Nothing -> fvarRules f
+      where
+        fvarRules cy =
+            case cy of
+                D (Choice s1 (Var 0)) | 0 `notElem` freeVars s1 -> return $ decrFVar s1 -- (11r)
+                D (Choice (Var 0) s1) | 0 `notElem` freeVars s1 -> return $ decrFVar s1 -- (12r)
+                s | 0 `notElem` freeVars s -> return $ decrFVar s  -- (13r)
+                Var 0 -> return $ D brUnit -- (14r)
+                _ -> Nothing
+    axBr (D (Choice s1 (D Dead))) = tryAxBr_ s1
+    axBr (D (Choice (D Dead) s2)) = tryAxBr_ s2
+    axBr (D (Choice s1 s2)) = do
+        case (axBr s1, axBr s2) of
+            (Nothing, Nothing) -> Nothing
+            (Just s1, Just s2) -> tryAxBr_ $ D $ Choice s1 s2
+            (Nothing, Just s2) -> tryAxBr_ $ D $ Choice s1 s2
+            (Just s1, Nothing) -> tryAxBr_ $ D $ Choice s1 s2
+    axBr _ = Nothing
+
+data AutSpec =
+    TransS Char AutSpec
+    | AcceptS
+    | DeadS
+    | ChoiceS AutSpec AutSpec
+    deriving Show
+
+(|->) :: Char -> AutSpec -> AutSpec
+(|->) = TransS
+
+infixr 3 |->
+
+mergeTransS :: Char -> AutSpec -> AutSpec -> AutSpec
+mergeTransS c1 aut1 (TransS c2 aut2)  =
+    if c1==c2 then
+        TransS c1 (mergeS aut1 aut2)
+    else
+        ChoiceS (TransS c1 (detS aut1)) (TransS c2 (detS aut2))
+mergeTransS c1 aut1 (ChoiceS aut21 aut22) = mergeS (mergeTransS c1 aut1 aut21) (mergeTransS c1 aut1 aut22)
+mergeTransS c1 aut1 AcceptS = ChoiceS (TransS c1 (detS aut1)) AcceptS
+mergeTransS c1 aut1 DeadS = DeadS
+
+mergeS :: AutSpec -> AutSpec -> AutSpec
+mergeS (TransS c1 aut1) aut2 = mergeTransS c1 aut1 aut2
+mergeS (ChoiceS aut11 aut12) aut2 = mergeS (mergeS aut11 aut2) (mergeS aut12 aut2)
+mergeS AcceptS aut2 = ChoiceS AcceptS (detS aut2)
+mergeS DeadS _ = DeadS
+
+detS :: AutSpec -> AutSpec
+detS (TransS c aut) = TransS c $ detS aut
+detS (ChoiceS aut1 aut2) = mergeS aut1 aut2
+detS AcceptS = AcceptS
+detS DeadS = DeadS
+
+-- merge :: Cy AutF -> Cases AutF (Cy AutF, Cy AutF)
+-- merge aut1 = AutC {
+--     caseTrans = \c (s,t) -> (D $ c :-> s, D $ c :-> t),
+--     caseAccept = (D Accept, D Accept),
+--     caseDead = (D Dead, D Dead),
+--     caseChoice = \(s1,t1) (s2,t2) ->
+--         (D $ Choice s1 s2, D $ Choice s1 s2)
+-- }
+
+-- det :: Cases AutF (Cy AutF, Cy AutF)
+-- det = AutC {
+--         caseTrans = \c (u, t) ->
+--             (D (c :-> u), D $ c :-> t),
+--         caseAccept =
+--             (D Accept, D Accept),
+--         caseDead =
+--             (D Dead, D Dead),
+--         caseChoice = \(s1,t1) (s2,t2) ->
+--             (fst (foldCy2 (merge t1) t2), D $ Choice t1 t2)
+--     }
 
 
 main = do
