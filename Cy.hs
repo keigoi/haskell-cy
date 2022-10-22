@@ -2,6 +2,8 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
+{-# HLINT ignore "Use second" #-}
 import Data.Maybe (fromMaybe)
 
 -- An (partial) implementation of Makoto Hamana's FOLDr rewriting system on cyclic data:
@@ -364,55 +366,45 @@ testIsAA cy = do
 -- specification (acyclic)
 data AutSpec =
     TransS Char AutSpec
-    | AcceptS
     | DeadS
     | ChoiceS AutSpec AutSpec
     deriving Show
 
-mergeTransS :: Char -> AutSpec -> AutSpec -> AutSpec
-mergeTransS c1 aut1 (TransS c2 aut2)  =
-    if c1==c2 then
-        TransS c1 (mergeS aut1 aut2)
-    else
-        ChoiceS (TransS c1 (detS aut1)) (TransS c2 (detS aut2))
-mergeTransS c1 aut1 AcceptS = ChoiceS (TransS c1 (detS aut1)) AcceptS
-mergeTransS c1 aut1 DeadS = TransS c1 aut1
-mergeTransS c1 aut1 (ChoiceS aut21 aut22) = mergeS (mergeTransS c1 aut1 aut21) (mergeTransS c1 aut1 aut22)
+-- acceptance is a special transition with symbol '!'
+acceptS :: AutSpec
+acceptS = TransS '!' DeadS
 
-mergeS :: AutSpec -> AutSpec -> AutSpec
-mergeS (TransS c1 aut1) aut2 = mergeTransS c1 aut1 aut2
-mergeS AcceptS aut2 = ChoiceS AcceptS (detS aut2)
-mergeS DeadS aut2 = aut2
-mergeS (ChoiceS aut11 aut12) aut2 = mergeS (mergeS aut11 aut2) (mergeS aut12 aut2)
+flattenAutHeadS :: AutSpec -> [(Char, AutSpec)]
+flattenAutHeadS (TransS c aut) = [(c, aut)]
+flattenAutHeadS DeadS = []
+flattenAutHeadS (ChoiceS aut1 aut2) = flattenAutHeadS aut1 ++ flattenAutHeadS aut2
 
-detS :: AutSpec -> AutSpec
-detS (TransS c aut) = TransS c $ detS aut
-detS AcceptS = AcceptS
-detS DeadS = DeadS
-detS (ChoiceS aut1 aut2) = mergeS aut1 aut2
+mergeHeadFunS :: (Char, AutSpec) -> [(Char, AutSpec)] -> [(Char, AutSpec)]
+mergeHeadFunS (c1, aut1) accum =
+    maybe
+        ((c1, aut1):accum)
+        (\aut2 -> (c1, ChoiceS aut1 aut2):filter ((c1/=) . fst) accum)
+        (lookup c1 accum)
 
--- paramorphism
-data AutSpecPara a = AutSpecPara {
-        caseTransS :: Char -> AutSpec -> a -> a,
-        caseAcceptS :: a,
-        caseDeadS :: a,
-        caseChoiceS :: AutSpec -> AutSpec -> a -> a -> a
-    }
+mergeHeadsToListS :: AutSpec -> [(Char, AutSpec)]
+mergeHeadsToListS aut = foldr mergeHeadFunS [] (flattenAutHeadS aut)
 
-detPara = AutSpecPara {
-    caseTransS  = \c s (r,m,_) -> 
-                  (TransS c undefined{-mを全部マージ-}, [TransS c s], undefined),
-    caseAcceptS = (AcceptS, [AcceptS], undefined),
-    caseDeadS   = (DeadS, [], undefined),
-    caseChoiceS = \s1 s2 (r1,m1,_) (r2,m2,_) -> 
-                  (ChoiceS r1 r2, m1++m2, undefined)
-}
+makeAutFromHeadsS :: [(Char, AutSpec)] -> AutSpec
+makeAutFromHeadsS [] = DeadS
+makeAutFromHeadsS heads = foldr1 ChoiceS (map (uncurry TransS) heads)
 
-paraAutSpec :: AutSpecPara p -> AutSpec -> p
-paraAutSpec f@AutSpecPara {caseTransS} (TransS c s) = caseTransS c s (paraAutSpec f s)
-paraAutSpec AutSpecPara {caseAcceptS} AcceptS = caseAcceptS
-paraAutSpec AutSpecPara {caseDeadS} DeadS = caseDeadS
-paraAutSpec f@AutSpecPara {caseChoiceS} (ChoiceS s t) = caseChoiceS s t (paraAutSpec f s) (paraAutSpec f t)
+detS aut =
+    let heads = mergeHeadsToListS aut
+        headsDet = map (\(c,aut) -> (c,detS aut)) heads
+    in
+    makeAutFromHeadsS headsDet
+
+ex1 =
+    TransS 'a' (TransS 'b' $ TransS 'c' $ acceptS)
+    `ChoiceS`
+    TransS 'a' (TransS 'b' $ TransS 'd' $ acceptS)
+    `ChoiceS`
+    TransS 'a' (TransS 'b' $ TransS 'c' $ TransS 'x' $ acceptS)
 
 {-
     Automata, using cy!
