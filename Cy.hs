@@ -3,8 +3,28 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
+{-# HLINT ignore "Use second" #-}
 
-import Data.Maybe (fromMaybe)
+{-# LANGUAGE Rank2Types, TypeFamilies, DataKinds, DeriveFunctor, GADTs #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
+{-# HLINT ignore "Use second" #-}
+{-# LANGUAGE Rank2Types, TypeFamilies, DataKinds, DeriveFunctor, GADTs #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
+{-# HLINT ignore "Use second" #-}
+
+{-# LANGUAGE Rank2Types, TypeFamilies, DataKinds, DeriveFunctor, GADTs #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
+{-# HLINT ignore "Use second" #-}
+import Data.Maybe (fromMaybe, catMaybes, listToMaybe)
 
 -- An (partial) implementation of Makoto Hamana's FOLDr rewriting system on cyclic data:
 -- Cyclic Datatypes modulo Bisimulation based on Second-Order Algebraic Theories
@@ -218,29 +238,29 @@ tryAxBr s = fromMaybe s (axBr s)
        Examples
     ************** -}
 
--- infinite list
-data IListF x = Cons Int x deriving Functor
+-- cyclic list
+data CListF x = CCons Int x deriving Functor
 
-instance FoldCy IListF where
-    collectF (Cons _ x) = x
-    elimF f self (Cons x xs) = f (Cons x $ self xs)
+instance FoldCy CListF where
+    collectF (CCons _ x) = x
+    elimF f self (CCons x xs) = f (CCons x $ self xs)
 
-instance ShowFoldCy IListF where
-    showF (Cons k s) = "Cons(" ++ show k ++ "," ++ s ++ ")"
+instance ShowFoldCy CListF where
+    showF (CCons k s) = "CCons(" ++ show k ++ "," ++ s ++ ")"
 
-inf12 :: Cy IListF
-inf12 = Cy (D $ Cons 1 (D $ Cons 2 $ Var 0))
+inf12 :: Cy CListF
+inf12 = Cy (D $ CCons 1 (D $ CCons 2 $ Var 0))
 
-inf23 :: Cy IListF
-inf23 = foldCy (\(Cons x r) -> D $ Cons (x+1) r) inf12
+inf23 :: Cy CListF
+inf23 = foldCy (\(CCons x r) -> D $ CCons (x+1) r) inf12
 
-tailIL :: Cy IListF -> Cy IListF
-tailIL = fst . foldCy2 (\(Cons k (x,y)) -> (y, D $ Cons k y))
+tailIL :: Cy CListF -> Cy CListF
+tailIL = fst . foldCy2 (\(CCons k (x,y)) -> (y, D $ CCons k y))
 
-tailIL' :: Cy IListF -> CyTup (IListF :+ IListF :+ One IListF)
-tailIL' = foldCyTup (\(Cons k (_ :+ _ :+ One z)) -> z :+ z :+ One (D (Cons k z)))
+tailIL' :: Cy CListF -> CyTup (CListF :+ CListF :+ One CListF)
+tailIL' = foldCyTup (\(CCons k (_ :+ _ :+ One z)) -> z :+ z :+ One (D (CCons k z)))
 
-tailIL2 :: Cy IListF -> Cy IListF
+tailIL2 :: Cy CListF -> Cy CListF
 tailIL2 = headTup . tailIL'
 
 data CStringF t =
@@ -393,6 +413,49 @@ detS aut =
     in
     makeAutFromHeadsS headsDet
 
+
+data SetF a x = Elt a | Empty | Union x x deriving Functor
+
+instance FoldCy (SetF a) where
+    collectF (Elt _) = mempty
+    collectF Empty = mempty
+    collectF (Union x y) = x <> y
+    elimF f self (Elt x)    = f (Elt x)
+    elimF f self Empty            = f Empty
+    elimF f self (Union xs ys) = f (Union (self xs) (self ys))
+
+instance Show a => ShowFoldCy (SetF a) where
+    showF (Elt k) = show k
+    showF Empty = "∅"
+    showF (Union xs ys) = "(" ++ xs ++ ") U (" ++ ys ++ ")"
+
+-- FIXME
+instance FoldAxBr (SetF a) where
+    brUnit = Empty
+    axBr (Cy f) = do
+        case axBr f of
+            Just cy ->
+                Just $ fromMaybe (Cy f) (fvarRules cy)
+            Nothing -> fvarRules f
+      where
+        fvarRules cy =
+            case cy of
+                D (Union s1 (Var 0)) | 0 `notElem` freeVars s1 -> return $ decrFVar s1 -- (11r)
+                D (Union (Var 0) s1) | 0 `notElem` freeVars s1 -> return $ decrFVar s1 -- (12r)
+                s | 0 `notElem` freeVars s -> return $ decrFVar s  -- (13r)
+                Var 0 -> return $ D brUnit -- (14r)
+                _ -> Nothing
+    axBr (D (Union s1 (D Empty))) = tryAxBr_ s1
+    axBr (D (Union (D Empty) s2)) = tryAxBr_ s2
+    axBr (D (Union s1 s2)) = do
+        case (axBr s1, axBr s2) of
+            (Nothing, Nothing) -> Nothing
+            (Just s1, Just s2) -> tryAxBr_ $ D $ Union s1 s2
+            (Nothing, Just s2) -> tryAxBr_ $ D $ Union s1 s2
+            (Just s1, Nothing) -> tryAxBr_ $ D $ Union s1 s2
+    axBr _ = Nothing
+
+
 ex1 =
     TransS 'a' (TransS 'b' $ TransS 'c' acceptS)
     `ChoiceS`
@@ -400,13 +463,49 @@ ex1 =
     `ChoiceS`
     TransS 'a' (TransS 'b' $ TransS 'c' $ TransS 'x' acceptS)
 
+mapSetF :: (a -> b) -> SetF a (Cy (SetF b)) -> Cy (SetF b)
+mapSetF f (Elt x) = D $ Elt $ f x
+mapSetF f Empty   = D Empty
+mapSetF f (Union s1 s2) = D $ Union s1 s2
+
+filterSetF :: (a -> Bool) -> SetF a (Cy (SetF a)) -> Cy (SetF a)
+filterSetF p (Elt x) | p x = D $ Elt x
+filterSetF p (Elt _) = D Empty
+filterSetF p Empty = D Empty
+filterSetF p (Union s1 s2) = D $ Union s1 s2
+
+lookupSetF :: Eq k => k -> SetF (k, v) (Cy (SetF v)) -> Cy (SetF v)
+lookupSetF k1 (Elt (k2, v)) | k1==k2 = D $ Elt v
+lookupSetF k1 (Elt _) = D Empty
+lookupSetF _  Empty   = D Empty
+lookupSetF _  (Union s1 s2) = D $ Union s1 s2
+
+headSet :: Cy (SetF a) -> Maybe a
+headSet (Cy t) = headSet t
+headSet (D (Elt e)) = Just e
+headSet (D (Union s1 s2)) = listToMaybe $ catMaybes [headSet s1, headSet s2]
+headSet (D Empty) = Nothing
+headSet (Var _) = Nothing
+
+lookupSet :: Eq k => k -> Cy (SetF (k, a)) -> Maybe a
+lookupSet k1 set = headSet $ foldCy (lookupSetF k1) set
+
+filterSet :: (a -> Bool) -> Cy (SetF a) -> Cy (SetF a)
+filterSet p = foldCy (filterSetF p)
+
+-- mergeHeadFunS :: (Char, AutSpec) -> [(Char, AutSpec)] -> [(Char, AutSpec)]
+-- mergeHeadFunS (c1, aut1) accum =
+--     maybe
+--         ((c1, aut1):accum)
+--         (\aut2 -> (c1, ChoiceS aut1 aut2):filter ((c1/=) . fst) accum)
+--         (lookup c1 accum)
+
 {-
     Automata, using cy!
 -}
 
 data AutF t =
     (:->) Char t
-    | Accept
     | Dead
     | (:++:) t t
     deriving Functor
@@ -415,19 +514,16 @@ infixr 3 :->
 
 instance FoldCy AutF where
     collectF (_ :-> s) = s
-    collectF Accept = mempty
     collectF Dead = mempty
     collectF (s1 :++: s2) = s1 <> s2
     elimF f self aut =
         case aut of
             c :-> t -> f (c :-> self t)
-            Accept -> f Accept
             Dead -> f Dead
             t1 :++: t2 -> f (self t1 :++: self t2)
 
 instance ShowFoldCy AutF where
     showF (c :-> t) = "-" ++ [c] ++ "->" ++ t
-    showF Accept = "1"
     showF Dead = "0"
     showF (t1 :++: t2) = "(" ++ t1 ++ " ++ " ++ t2 ++ ")"
 
@@ -455,6 +551,11 @@ instance FoldAxBr AutF where
             (Nothing, Just s2) -> tryAxBr_ $ D $ s1 :++: s2
             (Just s1, Nothing) -> tryAxBr_ $ D $ s1 :++: s2
     axBr _ = Nothing
+
+
+flattenAutHeadF (_, c :-> aut) = (D $ Elt (c, aut), D $ c :-> aut)
+flattenAutHeadF (_, Dead) = (D Empty, D Dead)
+flattenAutHeadF (s1 :++: s2, aut1 :++: aut2) = (D $ Union s1 s2, D $ aut1 :++: aut2)
 
 
 {-
