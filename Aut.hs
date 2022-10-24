@@ -52,28 +52,12 @@ detS aut =
     in
     makeAutFromHeadsS headsDet
 
-
+-- a rosetree datatype, simulating nondeterministic finite automata
 type Label = String
 data RoseTree = Tree Label [RoseTree] deriving Show
 
 cataRose :: (Label -> [a] -> a) -> RoseTree -> a
 cataRose f (Tree c ts) = f c (map (cataRose f) ts)
-
--- original (bit modified)
-levels (Tree c ts) = [c] : foldr (levelwiseConcat . levels) [] ts
-
--- auxiliary
-levelwiseConcat :: [[a]] -> [[a]] -> [[a]]
-levelwiseConcat (x:xs) (y:ys) = (x ++ y) : levelwiseConcat xs ys
-levelwiseConcat xs [] = xs
-levelwiseConcat [] ys = ys
-
--- alg for levels by (rose) list folding
-levelsC :: Label -> [(Label, [[Label]])] -> (Label, [[Label]])
-levelsC c cont = (c, map fst cont : foldr (levelwiseConcat . snd) [] cont)
-
-levelsCata :: RoseTree -> [[Label]]
-levelsCata t = let (hd,tl) = cataRose levelsC t in [hd] : tl
 
 headNeq :: Label -> RoseTree -> Bool
 headNeq c1 (Tree c2 _) = c1 /= c2
@@ -89,10 +73,25 @@ mergeTreeFun (Tree c1 t1) accum =
         (\t2 -> Tree c1 (t1 ++ t2) : filter (headNeq c1) accum) -- concat the subtree for later merging
         mfound
 
+-- a "tree merging" function, determinising transitions
 mergeTrees :: [RoseTree] -> [RoseTree]
 mergeTrees heads =
     let okHeads = foldr mergeTreeFun [] heads in
     map (\(Tree c t) -> Tree c (mergeTrees t)) okHeads
+
+
+-- alg for breadth-first traversal using catamorphism (unrelated)
+levelsC :: Label -> [(Label, [[Label]])] -> (Label, [[Label]])
+levelsC c cont = (c, map fst cont : foldr (levelwiseConcat . snd) [] cont)
+
+levelwiseConcat :: [[a]] -> [[a]] -> [[a]]
+levelwiseConcat (x:xs) (y:ys) = (x ++ y) : levelwiseConcat xs ys
+levelwiseConcat xs [] = xs
+levelwiseConcat [] ys = ys
+
+levelsCata :: RoseTree -> [[Label]]
+levelsCata t = let (hd,tl) = cataRose levelsC t in [hd] : tl
+
 
 extree1 :: [RoseTree]
 extree1 =
