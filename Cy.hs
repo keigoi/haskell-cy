@@ -9,6 +9,7 @@
 module Cy where
 
 import Data.Maybe (fromMaybe, catMaybes, listToMaybe)
+import TyCoRep (Coercion(LRCo))
 
 -- An (partial) implementation of Makoto Hamana's FOLDr rewriting system on cyclic data:
 -- Cyclic Datatypes modulo Bisimulation based on Second-Order Algebraic Theories
@@ -37,6 +38,9 @@ showCy' cnt (Var n) = "x" ++ show (cnt - n - 1)
 
 showCy :: ShowFoldCy f => Cy f -> String
 showCy = showCy' 0
+
+instance ShowFoldCy f => Show (Cy f) where
+    show = showCy
 
 -- printing de Bruijn indices directly
 showCyRaw :: ShowFoldCy f => Cy f -> String
@@ -127,13 +131,12 @@ tailTup (_ :+ gs) = gs
 
 type ElimCyF f t = (Cy f -> t) -> f (Cy f) -> t
 
+newtype CyMany gs = CyMany (CyTup gs -> CyTup gs)
+
 class FoldCyTup gs where
+    bekic   :: CyMany gs -> CyTup gs
     mapTup  :: (forall g. FoldCy g => Cy g -> Cy g) -> CyTup gs -> CyTup gs
     genVars :: Int -> CyTup gs
-    genCys  :: CyTup gs -> CyTup gs
-    incrFVarTup :: CyTup gs -> CyTup gs
-    -- the many-arg fold
-    foldBekic :: ElimCyF f (CyTup gs) -> [CyTup gs] -> Cy f -> CyTup gs
 
 lookupVars :: FoldCyTup gs => [CyTup gs] -> Int -> CyTup gs
 lookupVars vars n
@@ -142,48 +145,27 @@ lookupVars vars n
                           = vars !! (n - length vars + 1)
     | otherwise           = error "lookupVars: impossible - unbound recursion var"
 
-instance FoldCy g => FoldCyTup (One g) where
-    mapTup f (One c) = One $ f c
-    genVars i = One $ Var i
-    genCys (One g) = One $ Cy g
-    incrFVarTup (One cy) = One $ incrFVar cy
-    foldBekic elimFTup vars (Cy f)   = One $ Cy (unOne $ foldBekic elimFTup vars f)
-    foldBekic elimFTup vars (D y)    = elimFTup (foldBekic elimFTup vars) y
-    foldBekic _        vars (Var v)  = lookupVars vars v
-
-tie :: Cy g -> ElimCyF f (CyTup (g :+ gs)) -> ElimCyF f (CyTup gs)
-tie g elimFTup f2gs fcyf =
-    tailTup $ elimFTup (\cyf -> g :+ f2gs cyf) fcyf
-
 instance (FoldCy g, FoldCyTup gs) => FoldCyTup (g :+ gs) where
-    mapTup f (c :+ cs) = f c :+ mapTup f cs
+    bekic (CyMany gsfun) =
+        let t :+ ss0 = gsfun (Var 0 :+ bekic (CyMany (\gs -> tailTup $ gsfun (Var 0 :+ gs))))
+            ss = bekic (CyMany (\gs -> tailTup $ gsfun (Cy t :+ gs)))
+        in
+        Cy t :+ ss
     genVars i = Var i :+ genVars i
-    genCys (c :+ cs) = Cy c :+ genCys cs
-    incrFVarTup (cy1 :+ cys) = (:+) (incrFVar cy1) (mapTup incrFVar cys)
-    foldBekic elimTup vars (Cy cy0)  =
-        -- many-arg Bekič (broken)
-        let vars' = map incrFVarTup vars
-            (_ :+ ss0) = foldBekic elimTup ((Var 0 :+ genVars 0) : vars') cy0 -- this part seems broken -- see below comments
-            (t :+ _)   = foldBekic elimTup ((Var 0 :+ genCys ss0) : vars') cy0
-            -- and decomposing the rest of the tuple, recursively
-            -- FIXME "tying" is not work as intended... 
-            -- instead we must have elimTup as a separate functions for each component?
-            ss  = foldBekic (tie t elimTup) (genVars 0 : map (tailTup . incrFVarTup) vars) cy0 
-        in Cy t :+ genCys ss
+    mapTup f (c :+ cs) = f c :+ mapTup f cs
 
-    foldBekic elimTup vars (D y)   =  elimTup (foldBekic elimTup vars) y
-    foldBekic _       vars (Var v) = lookupVars vars v
-
-    -- foldBekic elimTup vars (Cy cy0)  =
-    --     -- many-arg Bekič!
-    --     let ssvars = map tailTup vars
-    --         ss0 = foldBekic (tie (error "todo") elimTup) ssvars (Cy cy0) -- we don't know how 
-    --         (t :+ _)   = foldBekic elimTup ((Var 0 :+ ss0) : map incrFVarTup vars) cy0
-    --         ss  = foldBekic (tie (error "todo") elimTup) ssvars (Cy cy0)
-    --     in Cy t :+ ss
+instance FoldCy g => FoldCyTup (One g) where
+    bekic (CyMany gfun) = One $ Cy (unOne $ gfun (One $ Var 0))
+    genVars i = One $ Var i
+    mapTup f (One c) = One $ f c
+    
+foldBekic :: (FoldCyTup gs, FoldCy f) => Alg f (CyTup gs) -> [CyTup gs] -> Cy f -> CyTup gs
+foldBekic alg vars (Cy cy) = bekic $ CyMany (\var -> foldBekic alg (var:vars) cy)
+foldBekic alg vars (D d)   = elimF alg (foldBekic alg vars) d
+foldBekic alg vars (Var n) = lookupVars vars n
 
 foldCyTup :: (FoldCy f, FoldCy g, FoldCyTup gs) => Alg f (CyTup (g :+ gs)) -> Cy f -> CyTup (g :+ gs)
-foldCyTup alg = mapTup cleanUnusedFVars . foldBekic (elimF alg) []
+foldCyTup alg = mapTup cleanUnusedFVars . foldBekic alg []
 
 class ConvTup tup where
     type Conv tup
@@ -210,16 +192,13 @@ instance ConvTup (Cy g1, Cy g2, Cy g3, Cy g4, Cy g5) where
     convTup (g1 :+ g2 :+ g3 :+ g4 :+ One g5) = (g1, g2, g3, g4, g5)
     unconvTup (g1, g2, g3, g4, g5) = g1 :+ g2 :+ g3 :+ g4 :+ One g5
 
-convTupCases :: ConvTup tup => ElimCyF f (CyTup (Conv tup)) -> ElimCyF f tup
-convTupCases elimF self cyf = convTup $ elimF (unconvTup . self) cyf
-
-unconvTupCases :: ConvTup tup => ElimCyF f tup -> ElimCyF f (CyTup (Conv tup))
-unconvTupCases elimF self cyf = unconvTup $ elimF (convTup . self) cyf
+unconvTupCases :: (FoldCy f, ConvTup tup) => Alg f tup -> Alg f (CyTup (Conv tup))
+unconvTupCases alg = unconvTup . alg . fmap convTup
 
 foldCyMany :: (FoldCy f, ConvTup tup, FoldCyTup (Conv tup)) => Alg f tup -> Cy f -> tup
 foldCyMany alg =
-    let elim = unconvTupCases (elimF alg) in
-    convTup . mapTup cleanUnusedFVars . foldBekic elim []
+    let alg' = unconvTupCases alg in
+    convTup . mapTup cleanUnusedFVars . foldBekic alg' []
 
 -- Cleaning up using AxBr. 
 
@@ -369,6 +348,11 @@ testIsAA cy = do
     putStrLn $ "term: " ++ showCy cy
     putStrLn $ "isAA> " ++ showCy (isAA cy)
 
+ex :: CyMany (CListF :+ CListF :+ One CListF)
+ex = CyMany (\(c1 :+ c2 :+ One c3) -> D (CCons 1 c1) :+ D (CCons 2 c1) :+ One (D (CCons 3 c3)))
+
+exBekic = bekic ex
+
 main = do
     putStrLn $ showCy inf12
     putStrLn $ showCy inf23
@@ -391,7 +375,17 @@ main = do
     testIsAA (a $ Cy $ b $ b $ Var 0)
     testIsAA (a $ b $ Cy $ a $ Var 0)
     testIsAA (a (Cy (b $ Cy $ a $ Var 0) `or_` a eps)) -- FIXME (true \/ cy(x0. (x0 \/ x0)))
-    putStrLn ""
+    -- putStrLn ""
+    -- print $ showCy2 $
+    --     foldCy2
+    --     (\(CCons hd (tl1, tl2)) -> (D $ CCons hd tl1, D $ CCons hd tl2))
+    --     $
+    --     Cy (D $ CCons 1 $ D $ CCons 2 $ Var 0)
+    -- print $ showCy2 $
+    --     foldCyMany
+    --     (\(CCons hd (tl1, tl2)) -> (D $ CCons hd tl1, D $ CCons hd tl2))
+    --     $
+    --     Cy (D $ CCons 1 $ D $ CCons 2 $ Var 0)
 
     -- automata examples (ongoing, does not work properly yet)
     -- testDet $ Cy $ D (D ('a' :-> D ('b' :-> D ('a' :-> Var 0))) :++: D ('a' :-> D ('b' :-> D ('c' :-> D Accept))))
