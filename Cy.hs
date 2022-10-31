@@ -5,6 +5,7 @@
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 {-# HLINT ignore "Use second" #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE InstanceSigs #-}
 
 module Cy where
 
@@ -59,31 +60,28 @@ shiftFVar' f cnt (Cy cy)  = Cy (shiftFVar' f (cnt+1) cy)
 shiftFVar' f cnt (D y)   = D (fmap (shiftFVar' f cnt) y)
 shiftFVar' f cnt (Var n) = if n >= cnt then Var (f n) else Var n
 
-shiftFVar :: Functor f => (Int -> Int) -> Cy f -> Cy f
-shiftFVar f = shiftFVar' f 0
+shiftFVars :: Functor f => (Int -> Int) -> Cy f -> Cy f
+shiftFVars f = shiftFVar' f 0
 
-incrFVar :: Functor f => Cy f -> Cy f
-incrFVar = shiftFVar (+1)
+incrFVars :: Functor f => Cy f -> Cy f
+incrFVars = shiftFVars (+1)
 
-decrFVar :: Functor f => Cy f -> Cy f
-decrFVar = shiftFVar (\i -> i - 1)
+decrFVars :: Functor f => Cy f -> Cy f
+decrFVars = shiftFVars (\i -> i - 1)
 
 incrFVarPair :: (Functor g1, Functor g2) => (Cy g1, Cy g2) -> (Cy g1, Cy g2)
-incrFVarPair (cy1,cy2) = (incrFVar cy1, incrFVar cy2)
+incrFVarPair (cy1,cy2) = (incrFVars cy1, incrFVars cy2)
 
 freeVars :: FoldCy f => Cy f -> [Int]
-freeVars (Cy f)  = filter (/=0) (freeVars f)
+freeVars (Cy f)  = map (\x -> x - 1) $ filter (/=0) (freeVars f)
 freeVars (D y)   = elimF collectF freeVars y
 freeVars (Var v) = [v]
 
 -- clean up unused bindings
-clean0 :: FoldCy f => Int -> Cy f -> Cy f
-clean0 lvl (Cy f) = if lvl `elem` freeVars f then Cy (clean0 (lvl+1) f) else clean0 lvl $ decrFVar f
-clean0 lvl (D y)  = D $ fmap (clean0 lvl) y
-clean0 lvl (Var v) = Var v
-
-cleanUnusedFVars :: FoldCy f => Cy f -> Cy f
-cleanUnusedFVars = clean0 0
+cleanCy :: FoldCy f => Cy f -> Cy f
+cleanCy (Cy f) = if 0 `elem` freeVars f then Cy (cleanCy f) else cleanCy $ decrFVars f
+cleanCy (D y)  = D $ fmap cleanCy y
+cleanCy (Var v) = Var v
 
 -- fold generating pair of cyclic structures, using Bekič
 foldCy2' :: (FoldCy f, Functor g1, Functor g2) =>
@@ -105,7 +103,7 @@ foldCy2' _   env (Var n)
     | otherwise          = error "fold2: impossible - unbound recursion var"
 
 foldCy2 :: (FoldCy f, FoldCy g1, FoldCy g2) => Alg f (Cy g1, Cy g2) -> Cy f -> (Cy g1, Cy g2)
-foldCy2 alg cy = let (x,y) = foldCy2' alg [] cy in (cleanUnusedFVars x, cleanUnusedFVars y)
+foldCy2 alg cy = let (x,y) = foldCy2' alg [] cy in (cleanCy x, cleanCy y)
 
 data One (f :: * -> *)
 data (f :: * -> *) :+ gs
@@ -129,14 +127,71 @@ headTup (g :+ _) = g
 tailTup :: CyTup (f :+ gs) -> CyTup gs
 tailTup (_ :+ gs) = gs
 
-type ElimCyF f t = (Cy f -> t) -> f (Cy f) -> t
+lengthTup :: CyTup gs -> Int
+lengthTup (One _) = 1
+lengthTup (_ :+ cs) = 1 + lengthTup cs
 
-newtype CyMany gs = CyMany (CyTup gs -> CyTup gs)
+newtype CyMany gs = CyMany ((Int -> Int) -> CyTup gs -> CyTup gs)
 
 class FoldCyTup gs where
     bekic   :: CyMany gs -> CyTup gs
-    mapTup  :: (forall g. FoldCy g => Cy g -> Cy g) -> CyTup gs -> CyTup gs
     genVars :: Int -> CyTup gs
+    mapTup  :: (forall g. FoldCy g => Cy g -> Cy g) -> CyTup gs -> CyTup gs
+
+instance (FoldCy g, FoldCyTup gs) => FoldCyTup (g :+ gs) where
+    bekic (CyMany gsfun) =
+        let t :+ _ = gsfun (+1) (Var 0 :+ bekic (CyMany (\shft gs -> tailTup $ gsfun (shft . (+1)) (Var (shft 0) :+ gs))))
+            ss = bekic (CyMany (\shft gs -> tailTup $ gsfun shft (shiftFVars shft (Cy t) :+ gs)))
+        in
+        Cy t :+ ss
+    genVars i = Var i :+ genVars i
+    mapTup f (c :+ cs) = f c :+ mapTup f cs
+
+instance FoldCy g => FoldCyTup (One g) where
+    bekic (CyMany gfun) = One $ Cy (unOne $ gfun (+1) (One $ Var 0))
+    mapTup f (One c) = One $ f c
+    genVars i = One $ Var i
+
+class ShowCyTup gs where
+    showCyTup0 :: CyTup gs -> String
+
+instance ShowFoldCy g => ShowCyTup (One g) where
+    showCyTup0 (One f) = showCy f
+
+instance (ShowFoldCy g, ShowCyTup gs) => ShowCyTup (g :+ gs) where
+    showCyTup0 (g :+ gs) = showCy g ++ ", " ++ showCyTup0 gs
+
+showCyTup :: ShowCyTup gs => CyTup gs -> [Char]
+showCyTup gs = "<" ++ showCyTup0 gs ++ ">"
+
+data CTreeF a = CNode Int a a deriving Functor
+
+instance FoldCy CTreeF where
+    collectF (CNode _ x y) = x <> y
+    elimF f self (CNode a xs ys) = f (CNode a (self xs) (self ys))
+
+instance ShowFoldCy CTreeF where
+    showF (CNode k s t) = "CNode(" ++ show k ++ "," ++ s ++ "," ++ t ++ ")"
+
+ex :: CyMany (CListF :+ CListF :+ CListF :+ One CListF)
+ex = CyMany (\_ (c0 :+ c1 :+ c2 :+ One c3) -> D (CCons 0 c2) :+ D (CCons 1 c3) :+ D (CCons 2 c1) :+ One (D (CCons 3 c0)))
+
+ex1 :: CyMany (CListF :+ CListF :+ CListF :+ One CListF)
+ex1 = CyMany (\_ (c0 :+ c1 :+ c2 :+ One c3) -> D (CCons 0 c3) :+ D (CCons 1 c0) :+ D (CCons 2 c1) :+ One (D (CCons 3 c2)))
+
+ex2 :: CyMany (CListF :+ CListF :+ CListF :+ CListF :+ CListF :+ CListF :+ One CListF)
+ex2 = CyMany (\_ (c0 :+ c1 :+ c2 :+ c3 :+ c4 :+ c5 :+ One c6) -> D (CCons 0 c6) :+ D (CCons 1 c0) :+ D (CCons 2 c3) :+ D (CCons 3 c1) :+ D (CCons 4 c2) :+ D (CCons 5 c0) :+ One (D (CCons 6 c4)))
+
+ex3 :: CyMany (CTreeF :+ CTreeF :+ One CTreeF)
+ex3 = CyMany (\_ (c0 :+ c1 :+ One c2) -> 
+    D (CNode 100 c0 (D (CNode 150 c1 c2))) :+ D (CNode 200 c1 (D (CNode 250 c2 c0))) :+ One (D (CNode 300 c2 (D (CNode 350 c0 c1)))))
+
+ex4 :: CyMany (CTreeF :+ CTreeF :+ CTreeF :+ One CTreeF)
+ex4 = CyMany (\_ (c0 :+ c1 :+ c2 :+ One c3) -> 
+    D (CNode 100 c0 (D (CNode 133 c1 (D (CNode 166 c2 c3))))) :+ 
+    D (CNode 200 c0 (D (CNode 233 c1 (D (CNode 266 c2 c3))))) :+ 
+    D (CNode 300 c0 (D (CNode 333 c1 (D (CNode 366 c2 c3))))) :+ 
+    One (D (CNode 400 c0 (D (CNode 433 c1 (D (CNode 466 c2 c3)))))))
 
 lookupVars :: FoldCyTup gs => [CyTup gs] -> Int -> CyTup gs
 lookupVars vars n
@@ -145,27 +200,13 @@ lookupVars vars n
                           = vars !! (n - length vars + 1)
     | otherwise           = error "lookupVars: impossible - unbound recursion var"
 
-instance (FoldCy g, FoldCyTup gs) => FoldCyTup (g :+ gs) where
-    bekic (CyMany gsfun) =
-        let t :+ ss0 = gsfun (Var 0 :+ bekic (CyMany (\gs -> tailTup $ gsfun (Var 0 :+ gs))))
-            ss = bekic (CyMany (\gs -> tailTup $ gsfun (Cy t :+ gs)))
-        in
-        Cy t :+ ss
-    genVars i = Var i :+ genVars i
-    mapTup f (c :+ cs) = f c :+ mapTup f cs
-
-instance FoldCy g => FoldCyTup (One g) where
-    bekic (CyMany gfun) = One $ Cy (unOne $ gfun (One $ Var 0))
-    genVars i = One $ Var i
-    mapTup f (One c) = One $ f c
-    
 foldBekic :: (FoldCyTup gs, FoldCy f) => Alg f (CyTup gs) -> [CyTup gs] -> Cy f -> CyTup gs
-foldBekic alg vars (Cy cy) = bekic $ CyMany (\var -> foldBekic alg (var:vars) cy)
+foldBekic alg vars (Cy cy) = bekic $ CyMany (\_ var -> foldBekic alg (var:map (mapTup (shiftFVars (+ lengthTup var))) vars) cy)
 foldBekic alg vars (D d)   = elimF alg (foldBekic alg vars) d
 foldBekic alg vars (Var n) = lookupVars vars n
 
 foldCyTup :: (FoldCy f, FoldCy g, FoldCyTup gs) => Alg f (CyTup (g :+ gs)) -> Cy f -> CyTup (g :+ gs)
-foldCyTup alg = mapTup cleanUnusedFVars . foldBekic alg []
+foldCyTup alg = mapTup cleanCy . foldBekic alg []
 
 class ConvTup tup where
     type Conv tup
@@ -198,7 +239,7 @@ unconvTupCases alg = unconvTup . alg . fmap convTup
 foldCyMany :: (FoldCy f, ConvTup tup, FoldCyTup (Conv tup)) => Alg f tup -> Cy f -> tup
 foldCyMany alg =
     let alg' = unconvTupCases alg in
-    convTup . mapTup cleanUnusedFVars . foldBekic alg' []
+    convTup . mapTup cleanCy . foldBekic alg' []
 
 -- Cleaning up using AxBr. 
 
@@ -267,9 +308,9 @@ instance FoldAxBr CStringF where
       where
         fvarRules cy =
             case cy of
-                D (Or s1 (Var 0)) | 0 `notElem` freeVars s1 -> return $ decrFVar s1 -- (11r)
-                D (Or (Var 0) s1) | 0 `notElem` freeVars s1 -> return $ decrFVar s1 -- (12r)
-                s | 0 `notElem` freeVars s -> return $ decrFVar s  -- (13r)
+                D (Or s1 (Var 0)) | 0 `notElem` freeVars s1 -> return $ decrFVars s1 -- (11r)
+                D (Or (Var 0) s1) | 0 `notElem` freeVars s1 -> return $ decrFVars s1 -- (12r)
+                s | 0 `notElem` freeVars s -> return $ decrFVars s  -- (13r)
                 Var 0 -> return $ D brUnit -- (14r)
                 _ -> Nothing
     axBr (D (Or s1 (D Eps))) = tryAxBr_ s1 -- (15r)
@@ -317,9 +358,9 @@ instance FoldAxBr ABoolF where
       where
         fvarRules cy =
             case cy of
-                D (Or_ s1 (Var 0)) | 0 `notElem` freeVars s1 -> return $ decrFVar s1 -- (11r)
-                D (Or_ (Var 0) s1) | 0 `notElem` freeVars s1 -> return $ decrFVar s1 -- (12r)
-                s | 0 `notElem` freeVars s -> return $ decrFVar s  -- (13r)
+                D (Or_ s1 (Var 0)) | 0 `notElem` freeVars s1 -> return $ decrFVars s1 -- (11r)
+                D (Or_ (Var 0) s1) | 0 `notElem` freeVars s1 -> return $ decrFVars s1 -- (12r)
+                s | 0 `notElem` freeVars s -> return $ decrFVars s  -- (13r)
                 Var 0 -> return $ D brUnit -- (14r)
                 _ -> Nothing
     axBr (D (Or_ s1 (D False_))) = tryAxBr_ s1
@@ -347,11 +388,6 @@ isAA = tryAxBr . fst . foldCy2 isAA'
 testIsAA cy = do
     putStrLn $ "term: " ++ showCy cy
     putStrLn $ "isAA> " ++ showCy (isAA cy)
-
-ex :: CyMany (CListF :+ CListF :+ One CListF)
-ex = CyMany (\(c1 :+ c2 :+ One c3) -> D (CCons 1 c1) :+ D (CCons 2 c1) :+ One (D (CCons 3 c3)))
-
-exBekic = bekic ex
 
 main = do
     putStrLn $ showCy inf12
