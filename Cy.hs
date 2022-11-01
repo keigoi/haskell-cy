@@ -1,16 +1,10 @@
-{-# LANGUAGE Rank2Types, TypeFamilies, DataKinds, DeriveFunctor, GADTs #-}
+{-# LANGUAGE Rank2Types, TypeFamilies, GADTs #-}
 {-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
-{-# HLINT ignore "Use second" #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE InstanceSigs #-}
+{-# LANGUAGE DeriveFunctor, FlexibleInstances, FlexibleContexts #-}
 
 module Cy where
 
-import Data.Maybe (fromMaybe, catMaybes, listToMaybe)
-import TyCoRep (Coercion(LRCo))
+import Data.Maybe (fromMaybe)
 
 -- An (partial) implementation of Makoto Hamana's FOLDr rewriting system on cyclic data:
 -- Cyclic Datatypes modulo Bisimulation based on Second-Order Algebraic Theories
@@ -83,28 +77,6 @@ cleanCy (Cy f) = if 0 `elem` freeVars f then Cy (cleanCy f) else cleanCy $ decrF
 cleanCy (D y)  = D $ fmap cleanCy y
 cleanCy (Var v) = Var v
 
--- fold generating pair of cyclic structures, using Bekič
-foldCy2' :: (FoldCy f, Functor g1, Functor g2) =>
-    Alg f (Cy g1, Cy g2)
-    -> [(Cy g1, Cy g2)]
-    -> Cy f
-    -> (Cy g1, Cy g2)
-foldCy2' alg env (Cy f)  =
-    -- Bekič
-    let (_,s0) = foldCy2' alg ((Var 0, Var 0) : map incrFVarPair env) f
-        (t,_)  = foldCy2' alg ((Var 0, Cy s0) : map incrFVarPair env) f
-        (_,s)  = foldCy2' alg ((Cy t, Var 0) : map incrFVarPair env) f
-    in (Cy t, Cy s)
-foldCy2' alg env (D y)   = elimF alg (foldCy2' alg env) y
-foldCy2' _   env (Var n)
-    | n < length env - 1 = (Var n, Var n) -- bound variable
-    | length env - 1 <= n && n < length env * 2 - 1
-                         = env !! (n - length env + 1) -- free variable - looking up the env
-    | otherwise          = error "fold2: impossible - unbound recursion var"
-
-foldCy2 :: (FoldCy f, FoldCy g1, FoldCy g2) => Alg f (Cy g1, Cy g2) -> Cy f -> (Cy g1, Cy g2)
-foldCy2 alg cy = let (x,y) = foldCy2' alg [] cy in (cleanCy x, cleanCy y)
-
 data One (f :: * -> *)
 data (f :: * -> *) :+ gs
 
@@ -164,46 +136,10 @@ instance (ShowFoldCy g, ShowCyTup gs) => ShowCyTup (g :+ gs) where
 showCyTup :: ShowCyTup gs => CyTup gs -> [Char]
 showCyTup gs = "<" ++ showCyTup0 gs ++ ">"
 
-data CTreeF a = CNode Int a a deriving Functor
-
-instance FoldCy CTreeF where
-    collectF (CNode _ x y) = x <> y
-    elimF f self (CNode a xs ys) = f (CNode a (self xs) (self ys))
-
-instance ShowFoldCy CTreeF where
-    showF (CNode k s t) = "CNode(" ++ show k ++ "," ++ s ++ "," ++ t ++ ")"
-
-ex :: CyMany (CListF :+ CListF :+ CListF :+ One CListF)
-ex = CyMany (\_ (c0 :+ c1 :+ c2 :+ One c3) -> D (CCons 0 c2) :+ D (CCons 1 c3) :+ D (CCons 2 c1) :+ One (D (CCons 3 c0)))
-
-ex1 :: CyMany (CListF :+ CListF :+ CListF :+ One CListF)
-ex1 = CyMany (\_ (c0 :+ c1 :+ c2 :+ One c3) -> D (CCons 0 c3) :+ D (CCons 1 c0) :+ D (CCons 2 c1) :+ One (D (CCons 3 c2)))
-
-ex2 :: CyMany (CListF :+ CListF :+ CListF :+ CListF :+ CListF :+ CListF :+ One CListF)
-ex2 = CyMany (\_ (c0 :+ c1 :+ c2 :+ c3 :+ c4 :+ c5 :+ One c6) -> D (CCons 0 c6) :+ D (CCons 1 c0) :+ D (CCons 2 c3) :+ D (CCons 3 c1) :+ D (CCons 4 c2) :+ D (CCons 5 c0) :+ One (D (CCons 6 c4)))
-
-ex3 :: CyMany (CTreeF :+ CTreeF :+ One CTreeF)
-ex3 = CyMany (\_ (c0 :+ c1 :+ One c2) -> 
-    D (CNode 100 c0 (D (CNode 150 c1 c2))) :+ D (CNode 200 c1 (D (CNode 250 c2 c0))) :+ One (D (CNode 300 c2 (D (CNode 350 c0 c1)))))
-
-ex4 :: CyMany (CTreeF :+ CTreeF :+ CTreeF :+ One CTreeF)
-ex4 = CyMany (\_ (c0 :+ c1 :+ c2 :+ One c3) -> 
-    D (CNode 100 c0 (D (CNode 133 c1 (D (CNode 166 c2 c3))))) :+ 
-    D (CNode 200 c0 (D (CNode 233 c1 (D (CNode 266 c2 c3))))) :+ 
-    D (CNode 300 c0 (D (CNode 333 c1 (D (CNode 366 c2 c3))))) :+ 
-    One (D (CNode 400 c0 (D (CNode 433 c1 (D (CNode 466 c2 c3)))))))
-
-lookupVars :: FoldCyTup gs => [CyTup gs] -> Int -> CyTup gs
-lookupVars vars n
-    | n < length vars - 1 = genVars n
-    | length vars - 1 <= n && n < length vars * 2 - 1
-                          = vars !! (n - length vars + 1)
-    | otherwise           = error "lookupVars: impossible - unbound recursion var"
-
 foldBekic :: (FoldCyTup gs, FoldCy f) => Alg f (CyTup gs) -> [CyTup gs] -> Cy f -> CyTup gs
-foldBekic alg vars (Cy cy) = bekic $ CyMany (\_ var -> foldBekic alg (var:map (mapTup (shiftFVars (+ lengthTup var))) vars) cy)
+foldBekic alg vars (Cy cy) = bekic $ CyMany (\_ var -> foldBekic alg (var:map (mapTup (shiftFVars (+ 1))) vars) cy)
 foldBekic alg vars (D d)   = elimF alg (foldBekic alg vars) d
-foldBekic alg vars (Var n) = lookupVars vars n
+foldBekic alg vars (Var n) = vars !! n
 
 foldCyTup :: (FoldCy f, FoldCy g, FoldCyTup gs) => Alg f (CyTup (g :+ gs)) -> Cy f -> CyTup (g :+ gs)
 foldCyTup alg = mapTup cleanCy . foldBekic alg []
@@ -272,7 +208,7 @@ inf23 :: Cy CListF
 inf23 = foldCy (\(CCons x r) -> D $ CCons (x+1) r) inf12
 
 tailIL :: Cy CListF -> Cy CListF
-tailIL = fst . foldCy2 (\(CCons k (x,y)) -> (y, D $ CCons k y))
+tailIL = fst . foldCyMany (\(CCons k (x,y)) -> (y, D $ CCons k y))
 
 tailIL' :: Cy CListF -> CyTup (CListF :+ CListF :+ One CListF)
 tailIL' = foldCyTup (\(CCons k (_ :+ _ :+ One z)) -> z :+ z :+ One (D (CCons k z)))
@@ -373,8 +309,8 @@ instance FoldAxBr ABoolF where
             (Just s1, Nothing) -> tryAxBr_ $ D $ Or_ s1 s2
     axBr _ = Nothing
 
-headIsA' (A _) = D $ True_
-headIsA' (B _) = D $ False_
+headIsA' (A _) = D True_
+headIsA' (B _) = D False_
 headIsA' Eps = D False_
 headIsA' (Or x y) = D $ Or_ x y
 
@@ -383,7 +319,7 @@ isAA' (B (v,w)) = (v, D $ B w)
 isAA' Eps = (D False_, D Eps)
 isAA' (Or (v1,w1) (v2,w2)) = (D $ Or_ v1 v2, D $ Or w1 w2)
 
-isAA = tryAxBr . fst . foldCy2 isAA'
+isAA = tryAxBr . fst . foldCyMany isAA'
 
 testIsAA cy = do
     putStrLn $ "term: " ++ showCy cy
@@ -411,30 +347,17 @@ main = do
     testIsAA (a $ Cy $ b $ b $ Var 0)
     testIsAA (a $ b $ Cy $ a $ Var 0)
     testIsAA (a (Cy (b $ Cy $ a $ Var 0) `or_` a eps)) -- FIXME (true \/ cy(x0. (x0 \/ x0)))
-    -- putStrLn ""
-    -- print $ showCy2 $
-    --     foldCy2
-    --     (\(CCons hd (tl1, tl2)) -> (D $ CCons hd tl1, D $ CCons hd tl2))
-    --     $
-    --     Cy (D $ CCons 1 $ D $ CCons 2 $ Var 0)
-    -- print $ showCy2 $
-    --     foldCyMany
-    --     (\(CCons hd (tl1, tl2)) -> (D $ CCons hd tl1, D $ CCons hd tl2))
-    --     $
-    --     Cy (D $ CCons 1 $ D $ CCons 2 $ Var 0)
 
-    -- automata examples (ongoing, does not work properly yet)
-    -- testDet $ Cy $ D (D ('a' :-> D ('b' :-> D ('a' :-> Var 0))) :++: D ('a' :-> D ('b' :-> D ('c' :-> D Accept))))
-    -- testDet $ Cy $ D (D ('a' :-> D ('b' :-> Var 0)) :++: D ('a' :-> D ('c' :-> D Accept)))
-    -- testDet $ D (D ('a' :-> Cy (D ('b' :-> Var 0))) :++: D ('a' :-> D ('c' :-> D Accept)))
+    print $
+        foldCyMany (\(CCons hd (tl1, tl2, tl3)) -> (tl2, D $ CCons hd tl1, D $ CCons hd tl2)) $ Cy (D $ CCons 1 $ D $ CCons 2 $ Var 0)
 
 -- *Main> main
--- cy(x0. Cons(1,Cons(2,x0)))
--- cy(x0. Cons(2,Cons(3,x0)))
--- Cons(2,cy(x0. Cons(1,Cons(2,x0))))
--- Cons(3,cy(x0. Cons(2,Cons(3,x0))))
--- Cons(2,cy(x0. Cons(1,Cons(2,x0))))
--- Cons(3,cy(x0. Cons(2,Cons(3,x0))))
+-- cy(x0. CCons(1,CCons(2,x0)))
+-- cy(x0. CCons(2,CCons(3,x0)))
+-- CCons(2,cy(x0. CCons(1,CCons(2,x0))))
+-- CCons(3,cy(x0. CCons(2,CCons(3,x0))))
+-- CCons(2,cy(x0. CCons(1,CCons(2,x0))))
+-- CCons(3,cy(x0. CCons(2,CCons(3,x0))))
 
 -- term: b(a(a(b(ε))))
 -- isAA> true
@@ -452,4 +375,5 @@ main = do
 -- term: a(b(cy(x0. a(x0))))
 -- isAA> true
 -- term: a((cy(x0. b(cy(x1. a(x1))))|a(ε)))
--- isAA> (true \/ cy(x0. (x0 \/ x0)))
+-- isAA> (true \/ true)
+-- (cy(x0. CCons(2,x0)),cy(x0. CCons(1,x0)),CCons(1,CCons(2,cy(x0. CCons(2,x0)))))
